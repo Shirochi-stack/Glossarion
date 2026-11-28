@@ -47,12 +47,80 @@ class RunResult:
     skipped: int = 0
     images: int = 0
     stopped: bool = False
+    no_image_model: str = ''
     changed_files: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
 
 class _Stop(Exception):
     pass
+
+
+@dataclass
+class ImageModelChoice:
+    """The model that draws and why: ``source`` is ``'the Interactive Images image model'``, ``'the Image Gen / Edit
+    pool'`` or ``'the text model'``; ``capability`` is ``image_capability`` of a text model used for pictures."""
+    model: str = ''
+    source: str = ''
+    capability: str = ''
+
+    @property
+    def probe(self):
+        """The first image request decides (the text model is of unknown capability)."""
+        return self.source == 'the text model' and self.capability == 'unknown'
+
+
+def resolve_image_model(config, settings, text_model):
+    """1) the Interactive Images image model, 2) the Image Gen / Edit pool model, 3) the text model when it is not
+    known to be text-only. ``model`` is '' when none can draw."""
+    if settings.image_model:
+        return ImageModelChoice(settings.image_model, 'the Interactive Images image model')
+    pooled = image_pool_model(config)
+    if pooled:
+        return ImageModelChoice(pooled, 'the Image Gen / Edit pool')
+    capability = core.image_capability(text_model)
+    if capability == 'text_only':
+        return ImageModelChoice('', 'the text model', capability)
+    return ImageModelChoice(text_model, 'the text model', capability)
+
+
+class _ImageProbe:
+    """A text model of unknown capability draws the pictures: its first image request is the probe. Other image
+    requests wait for the verdict; when no image comes back the run stops (no retries, no more planner requests)."""
+
+    def __init__(self, model, stop_event, result, log):
+        self.model = model
+        self.stop_event = stop_event
+        self.result = result
+        self.log = log
+        self.verdict = None
+        self._lock = threading.Lock()
+
+    def run(self, send):
+        if self.verdict is None:
+            with self._lock:
+                if self.verdict is None:
+                    try:
+                        out = send()
+                    except _Stop:
+                        raise
+                    except Exception as exc:
+                        self.verdict = False
+                        message = (f"the text model {self.model} was tried for pictures (it is not known to draw "
+                                   f"them) and its first image request returned no image ({exc}). Set an Image "
+                                   f"model (Interactive Images settings or the Image Gen / Edit pool), or set "
+                                   f"images per chapter to 0.")
+                        self.result.errors.append('no image model')
+                        self.result.no_image_model = message
+                        self.log(f"❌ Interactive Images: {message}")
+                        self.stop_event.set()
+                        raise _Stop() from None
+                    self.verdict = True
+                    self.log(f"ℹ️ Interactive Images: {self.model} returned a picture; it keeps drawing")
+                    return out
+        if self.verdict is False:
+            raise _Stop()
+        return send()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -454,8 +522,11 @@ def prepare_stylesheet(config, output_dir, log):
 
 def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_event=None,
                            on_progress: Optional[Callable] = None, client_factory=None, recompile=None,
-                           batch: Optional[BatchSettings] = None):
+                           batch: Optional[BatchSettings] = None, glossary_path: Optional[str] = None):
     """Run the Interactive Images step on one book's output folder.
+
+    ``glossary_path``: the glossary translation uses for this book (``core.find_book_glossary(output_dir,
+    owner)``, resolved by the caller on its own thread); '' = translation uses none; None = the plain lookup.
 
     ``batch``: the translation's batch settings (:func:`batch_settings_from_owner`); None or Batch Translation off
     (or batch size 1) = one request at a time. On, up to ``batch.workers`` chapters run at once and a chapter's image
@@ -472,14 +543,18 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
     result = RunResult()
     settings = core.settings_from_config(config)
     text_model = settings.text_model or str(config.get('model') or '')
-    image_model = settings.image_model or image_pool_model(config)
+    choice = resolve_image_model(config, settings, text_model) if text_model else ImageModelChoice()
+    image_model = choice.model
     wants_images = settings.per_chapter > 0
     if not text_model:
         log("❌ Interactive Images: no text model (set one, or the main translation model)")
         result.errors.append('no text model')
         return result
     if wants_images and not image_model:
-        log("❌ Interactive Images: no image model set (Interactive Images settings), or set images per chapter to 0")
+        result.no_image_model = (f"no image-capable model found: no Interactive Images image model, no Image Gen / Edit "
+                                 f"pool model, and the text model {text_model} is text-only. Set an image model, or "
+                                 f"set images per chapter to 0")
+        log(f"❌ Interactive Images: {result.no_image_model}")
         result.errors.append('no image model')
         return result
 
@@ -492,10 +567,11 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
         css_text = presets.read_book_stylesheet(output_dir)
         stylesheet = {'preset': preset_name, 'hash': hashlib.md5(css_text.encode('utf-8')).hexdigest()}
     ipc.set_book_info(path, str(config.get('active_interactive_images_prompt_profile') or 'Default'), stylesheet)
-    entries = core.load_glossary_entries(output_dir)
+    glossary = core.find_book_glossary(output_dir) if glossary_path is None else (glossary_path or None)
+    entries = core.load_glossary_entries(output_dir, glossary) if glossary else []
     name_map = core.glossary_name_map(entries)
     names = core.character_names(entries)
-    tracker = core.load_gender_tracker(output_dir) if settings.include_gender else {}
+    tracker = core.load_gender_tracker(output_dir, glossary) if settings.include_gender and glossary else {}
     refs = core.load_references(output_dir)
     max_refs = core.effective_reference_count(image_model, settings.max_references)
     if wants_images and core.reference_limit(image_model) == 0:
@@ -513,11 +589,15 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
         wanted = {os.path.basename(str(key)) for key in keys}
     work = [chapter for chapter in chapters if chapter.key in wanted]
     log(f"🖼 Interactive Images: {len(work)} chapter(s), {settings.per_chapter} image(s) per chapter, "
-        f"text model {text_model}" + (f", image model {image_model}" if wants_images else ''))
+        f"text model {text_model}" + (f", image model {image_model} ({choice.source})" if wants_images else ''))
 
     # batch mode (the translation's settings): chapters and a chapter's image requests overlap; off = one at a time
     if batch is not None and not batch.parallel:
         batch = None
+    probe = _ImageProbe(image_model, stop_event, result, log) if wants_images and choice.probe else None
+    if probe is not None:
+        log(f"\u2139\ufe0f Interactive Images: the text model {image_model} draws the pictures; it is not known "
+            f"whether it can, so its first image request is the test")
     clients = _Clients(client_factory, {'text': text_model, 'image': image_model}, config, output_dir)
     dispatcher = _Dispatcher(batch, stop_event)
     result_lock = threading.Lock()
@@ -540,7 +620,7 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
             status = _run_chapter(config, settings, output_dir, path, chapter, clients, dispatcher,
                                   text_model, image_model, css_classes, (names, entries, tracker), name_map, refs,
                                   max_refs, count_tokens, budget, stop_event, chapter_log, on_progress, notify_lock,
-                                  batch)
+                                  batch, probe)
         except _Stop:
             ipc.set_status(path, chapter.key, 'pending', 'stopped')
             with result_lock:
@@ -630,7 +710,7 @@ def _check_stop(stop_event):
 
 def _run_chapter(config, settings, output_dir, path, chapter, clients, dispatcher, text_model, image_model,
                  css_classes, characters, name_map, refs, max_refs, count_tokens, budget, stop_event, log,
-                 on_progress, notify_lock=None, batch=None):
+                 on_progress, notify_lock=None, batch=None, probe=None):
     names, entries, tracker = characters
     # confident genders at this chapter (glossary + gender tracker), written through the editable placeholder text
     genders = core.character_genders(entries, tracker, chapter.number) if settings.include_gender else {}
@@ -721,11 +801,15 @@ def _run_chapter(config, settings, output_dir, path, chapter, clients, dispatche
                 full = os.path.join(folder, rel)
                 if os.path.isfile(full):
                     content.append({'type': 'image_url', 'image_url': {'url': _data_url(full)}})
-            with dispatcher.request(), clients.checkout('image') as image_client:
-                # a client serves one request at a time: its aspect ratio and the reply bytes are this request's own
-                _set_image_aspect(image_client, ratio)
-                reply = _send(image_client, _messages(settings.image_system_prompt, content), config, IMAGE_CONTEXT)
-                data, ext = _image_bytes_from_response(image_client, reply)
+            def request():
+                with dispatcher.request(), clients.checkout('image') as image_client:
+                    # a client serves one request at a time: its aspect ratio and the reply bytes are its own
+                    _set_image_aspect(image_client, ratio)
+                    reply = _send(image_client, _messages(settings.image_system_prompt, content), config,
+                                  IMAGE_CONTEXT)
+                    return _image_bytes_from_response(image_client, reply)
+
+            data, ext = probe.run(request) if probe is not None else request()
             name = core.image_filename(chapter.number, k, ext)
             target = os.path.join(folder, name)
             tmp = target + '.tmp'

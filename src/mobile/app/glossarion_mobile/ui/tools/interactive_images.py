@@ -663,7 +663,7 @@ class InteractiveImagesScreen(Screen):
         self.text_model = ModelPicker(value=values["interactive_images_text_model"], label="Text model (empty = main)",
                                       env=env, on_change=lambda v: self.set_value("interactive_images_text_model", v),
                                       key="ix-text-model")
-        self.image_model = ModelPicker(value=values["interactive_images_image_model"], label="Image model", env=env,
+        self.image_model = ModelPicker(value=values["interactive_images_image_model"], label="Image model (empty: pool model, else the text model)", env=env,
                                        on_change=self._on_image_model, key="ix-image-model")
         self.ref_note = ft.Text("", theme_style=ft.TextThemeStyle.BODY_SMALL, key="ix-ref-note")
         self.pool_note = hint_text("", key="ix-pool-note")
@@ -702,7 +702,9 @@ class InteractiveImagesScreen(Screen):
                 self.image_model, self.ref_note,
             ], icon="SMART_TOY", key="ix-models-card"),
             card("Image keys", [
-                hint_text("The image requests use the Image Gen / Edit key pool when it is on (desktop 🔑 Image Keys)."),
+                hint_text("The image requests use the Image Gen / Edit key pool when it is on (desktop 🔑 Image Keys). "
+                      "With no image model set, the pool's model draws; with no pool, the text model does "
+                      "(when it is not known to be text-only)."),
                 *pool_tiles, self.pool_note,
                 ft.Row([ft.TextButton(content="🔑 Image keys", icon=ft.Icons.KEY, key="ix-image-keys",
                                       on_click=lambda e: self.ctx.go("settings.keys.pool", {"pool": "inpainter"}))]),
@@ -773,18 +775,19 @@ class InteractiveImagesScreen(Screen):
         self.style_list = ft.Column(spacing=4, tight=True, key="ix-style-refs")
         self.name_field = ft.TextField(label="Character name", dense=True, expand=True, key="ix-ref-name")
         self.refs_note = hint_text("", key="ix-refs-note")
+        self.glossary_note = hint_text("", key="ix-refs-glossary")
+        self.glossary_names: tuple = ()
+        self.glossary_file: Optional[str] = None
         controls = [
             card("Characters", [
                 hint_text("Images are copied into Interactive_Images/references/ of the book. The scene's characters "
                           "fill the reference slots first, then the art-style images."),
+                self.glossary_note,
                 self.refs_note,
                 ft.Row([self.name_field,
                         ft.IconButton(icon=ft.Icons.ADD, tooltip="+ Character", size_constraints=HIT_TARGET,
                                       on_click=lambda e: self.ctx.spawn(self.add_character()), key="ix-ref-add")],
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Row([ft.FilledTonalButton(content="Load names from glossary", icon=ft.Icons.PEOPLE,
-                                             on_click=lambda e: self.ctx.spawn(self.load_names()),
-                                             key="ix-ref-glossary")], wrap=True),
                 self.refs_list,
             ], icon="FACE", key="ix-refs-card"),
             card("Art style", [
@@ -799,7 +802,14 @@ class InteractiveImagesScreen(Screen):
 
     async def load_references(self) -> dict:
         folder = self.folder
-        self.refs = await self.ctx.io(_core().load_references, folder) if folder else _core().empty_references()
+        core = _core()
+        self.refs = await self.ctx.io(core.load_references, folder) if folder else core.empty_references()
+
+        def glossary_characters():
+            path = self.glossary_in_use()
+            return path, tuple(core.character_names(core.load_glossary_entries(folder, path))) if path else ()
+
+        self.glossary_file, self.glossary_names = await self.ctx.io(glossary_characters) if folder else (None, ())
         self._render_refs()
         return self.refs
 
@@ -809,8 +819,15 @@ class InteractiveImagesScreen(Screen):
         self.refs_note.value = "" if folder else "Choose a translated book first."
         self.refs_note.visible = not folder
         rows = []
-        for name, paths in core.reference_rows(self.refs):
+        if folder:
+            self.glossary_note.value = (
+                f"Characters from the glossary translation uses: {self.glossary_file}" if self.glossary_file
+                else "No glossary in use for this book (translation uses none).")
+        self.glossary_note.visible = bool(folder)
+        for name, paths, in_glossary in core.reference_rows_with_glossary(self.refs, self.glossary_names):
             files = ", ".join(os.path.basename(p) for p in paths) or "no images yet"
+            if not in_glossary:
+                files += " · not in glossary"
             rows.append(ft.Container(content=ft.Row([
                 ft.Column([ft.Text(name, weight=ft.FontWeight.W_600),
                            ft.Text(f"{len(paths)}: {files}", theme_style=ft.TextThemeStyle.BODY_SMALL,
@@ -830,7 +847,7 @@ class InteractiveImagesScreen(Screen):
                                         key=f"ix-style-rm-{os.path.basename(p)}")])
                   for p in (self.refs.get("style") or ())]
         self.style_list.controls = styles or [hint_text("No art-style images.", key="ix-style-empty")]
-        self.ctx.push(self.refs_list, self.style_list, self.refs_note)
+        self.ctx.push(self.refs_list, self.style_list, self.refs_note, self.glossary_note)
 
     def _need_book(self) -> bool:
         if self.folder:
@@ -853,17 +870,12 @@ class InteractiveImagesScreen(Screen):
         await self._save_refs()
         return added
 
-    async def load_names(self) -> int:
-        if not self._need_book():
-            return 0
+    def glossary_in_use(self) -> Optional[str]:
+        """Blocking: the glossary translation uses for this book (the Glossary Mode / auto-glossary output,
+        resolved by the shared ``RunEnvMixin._resolve_book_glossary``), or None."""
         core = _core()
-        names = await self.ctx.io(lambda: core.character_names(core.load_glossary_entries(self.folder)))
-        if not names:
-            self.ctx.say("No character names found in this book's glossary.")
-            return 0
-        added = core.add_reference_names(self.refs, names)
-        await self._save_refs()
-        return added
+        return core.find_book_glossary(self.folder, core.glossary_resolver(self.ctx.config_snapshot())) \
+            if self.folder else None
 
     async def add_images(self, name: Optional[str]) -> list:
         if not self._need_book():

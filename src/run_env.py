@@ -1084,6 +1084,41 @@ class RunEnvMixin:
 
         return ''
 
+    def _glossary_shared_dir(self):
+        """The shared ``Glossary`` folder translation puts in ``GLOSSARY_SHARED_DIR``: under the output
+        override when there is one, else under the app folder."""
+        override = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        if override:
+            return os.path.join(os.path.abspath(override), 'Glossary')
+        return os.path.join(_get_app_dir(), 'Glossary')
+
+    def _resolve_book_glossary(self, output_dir, source_path=None):
+        """The glossary file translation uses for the book whose output folder is ``output_dir`` right now, or
+        None. The same inputs ``_get_environment_variables`` hands the engine: the glossary the Load Glossary
+        button / the auto-load put in effect (``_resolve_glossary_for_env``: the per-book map, else
+        ``manual_glossary_path``), the Glossary Mode (``_current_auto_glossary_mode``: no glossary, Balanced /
+        Full / single pass prefer the auto-glossary output), the output override and the shared folder, then the
+        engine's own ``find_glossary_file``. Nothing is loaded or changed. ``source_path``: the book's source
+        file (default: the one recorded in the output folder)."""
+        from TransateKRtoEN import find_glossary_file
+        if not source_path:
+            try:
+                from library_core import _read_source_epub_pointer
+                source_path = _read_source_epub_pointer(output_dir)
+            except Exception:
+                source_path = None
+        mode = self._current_auto_glossary_mode()
+        override = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        settings = {
+            'AUTO_GLOSSARY_MODE': mode,
+            'SINGLE_PASS_GLOSSARY_MODE': '1' if mode == 'single_pass' else '',
+            'OUTPUT_DIRECTORY': os.path.abspath(override) if override else '',
+            'GLOSSARY_SHARED_DIR': self._glossary_shared_dir(),
+            'GLOSSARY_SOURCE_PATH': str(source_path or ''),
+            'MANUAL_GLOSSARY': self._resolve_glossary_for_env(str(source_path or '')),
+        }
+        return find_glossary_file(output_dir, source_path=source_path or None, settings=settings)
+
     def _get_environment_variables(self, epub_path, api_key):
         """Get all environment variables for translation/glossary"""
 
@@ -3508,3 +3543,14 @@ def build_pdf_compile_env(owner):
 def build_startup_env(owner):
     """Startup env delta (``owner.initialize_environment_variables``) without leaving it applied."""
     return capture_env_delta(owner.initialize_environment_variables)
+
+
+class GlossaryResolver(RunEnvMixin):
+    """A side-effect-free stand-in owner that answers ``_resolve_book_glossary`` from a config snapshot (the
+    mobile screens: no HeadlessOwner start-up, no environment writes). ``manual_glossary_path`` /
+    ``manual_glossary_map``: what the Load Glossary button put in effect (None: nothing was loaded)."""
+
+    def __init__(self, config, manual_glossary_path=None, manual_glossary_map=None):
+        self.config = config if isinstance(config, dict) else {}
+        self.manual_glossary_path = manual_glossary_path
+        self.manual_glossary_map = manual_glossary_map or {}

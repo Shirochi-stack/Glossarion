@@ -716,6 +716,32 @@ def effective_reference_count(model, max_refs):
 
 NO_REFERENCE_WARNING = "This image model takes no reference images; characters are described by name only"
 
+#: Chat routes whose models answer an image request with a picture when the request asks for image output
+#: (``UnifiedClient._route_wants_image_output``: AuthGPT's image_generation tool, AuthGem).
+IMAGE_OUTPUT_ROUTES = ('authgpt/', 'authgem/')
+#: Model families known to answer in text only (checked after the image rules, so ``qwen-image`` stays an image
+#: model). A model matching none of the rules is "unknown": the run probes it with one real image request.
+TEXT_ONLY_MODELS = re.compile(
+    r'(?:^|[/:])(?:deepseek|claude|llama|mistral|mixtral|codestral|qwen|kimi|glm|command|sonar|yi-)', re.I)
+
+
+def image_capability(model):
+    """``'image'`` (the model draws pictures: UnifiedClient's own image-model rule, or a route that returns images),
+    ``'text_only'`` (a family known to answer in text only) or ``'unknown'`` (a custom prefix, a new model)."""
+    value = str(model or '').strip()
+    if not value:
+        return 'unknown'
+    try:
+        from unified_api_client import UnifiedClient
+        is_image = UnifiedClient._is_image_gen_model(value)
+    except Exception:
+        is_image = 'image' in value.lower() or 'nano-banana' in value.lower()
+    if is_image or value.lower().startswith(IMAGE_OUTPUT_ROUTES):
+        return 'image'
+    if TEXT_ONLY_MODELS.search(value):
+        return 'text_only'
+    return 'unknown'
+
 
 def reference_note(model):
     """``(level, text)`` the settings screens show next to the image model (desktop dialog and mobile):
@@ -735,6 +761,16 @@ def reference_rows(refs):
     """``[(name, [relative paths])]`` of the characters, sorted case-insensitively (the references editors)."""
     chars = (refs or {}).get('characters') or {}
     return sorted(((name, list(paths)) for name, paths in chars.items()), key=lambda kv: kv[0].casefold())
+
+
+def reference_rows_with_glossary(refs, glossary_names):
+    """``[(name, [paths], in_glossary)]``: the references editors' rows. Every character of the book's glossary
+    is listed (with the images attached to it); a name that has images or was added by hand but is not in the
+    glossary (any more) stays listed with ``in_glossary`` False, so its images are never lost."""
+    names = {' '.join(str(n or '').split()) for n in glossary_names or ()} - {''}
+    chars = (refs or {}).get('characters') or {}
+    rows = [(name, list(chars.get(name, [])), name in names) for name in set(chars) | names]
+    return sorted(rows, key=lambda row: row[0].casefold())
 
 
 def add_reference_names(refs, names):
@@ -1183,7 +1219,7 @@ PROMPT_FIELD_PLACEHOLDERS = {
 _CHARACTER_PREVIEW_LIMIT = 12
 
 
-def prompt_placeholder_values(field, config, output_dir=None):
+def prompt_placeholder_values(field, config, output_dir=None, owner=None):
     """``{name: value}`` of the placeholders of one prompt editor (``planner`` / ``image`` / ``image_system`` /
     ``css``), what each says now, for the placeholder tooltips (desktop hover, mobile value sheet). A value is a
     str or a ``prompt_defaults.placeholder_value_parts`` dict. UI only: nothing here is ever sent to a model.
@@ -1220,9 +1256,10 @@ def prompt_placeholder_values(field, config, output_dir=None):
             values['character_names'] = per_request(
                 "the book's glossary characters, each with a gender only when it is confident.")
         else:
-            entries = load_glossary_entries(output_dir)
+            glossary = find_book_glossary(output_dir, owner)
+            entries = load_glossary_entries(output_dir, glossary) if glossary else []
             names = character_names(entries)
-            tracker = load_gender_tracker(output_dir) if settings.include_gender else {}
+            tracker = load_gender_tracker(output_dir, glossary) if settings.include_gender else {}
             genders = character_genders(entries, tracker) if settings.include_gender else {}
             lines = [format_character(name, genders.get(name), settings) for name in names]
             more = len(lines) - _CHARACTER_PREVIEW_LIMIT
@@ -1254,12 +1291,12 @@ PLACEHOLDER_TOKEN_DESCRIPTIONS = {
 }
 
 
-def describe_placeholder(name, config, output_dir=None, field=None):
+def describe_placeholder(name, config, output_dir=None, field=None, owner=None):
     """What ``{name}`` says now, for any placeholder the step shows (a prompt placeholder of ``field`` or of any
     prompt, a token of a placeholder text, or an editable placeholder text such as ``character_gender``): a str or
     a ``placeholder_value_parts`` dict. UI only: never sent to a model."""
     for candidate in ([field] if field else ['planner', 'image', 'css']):
-        values = prompt_placeholder_values(candidate, config, output_dir)
+        values = prompt_placeholder_values(candidate, config, output_dir, owner)
         if name in values:
             return values[name]
     if name in PLACEHOLDER_TOKEN_DESCRIPTIONS:
@@ -1536,8 +1573,16 @@ def profile_texts_for_run(config):
 # Glossary of a book
 # ---------------------------------------------------------------------------------------------
 
-def find_book_glossary(output_dir):
-    """The book's glossary file (the translator's own lookup when importable; else the output folder)."""
+def find_book_glossary(output_dir, owner=None):
+    """The book's glossary file. With ``owner`` (the main window or a HeadlessOwner): exactly the glossary
+    translation uses for this book now (``RunEnvMixin._resolve_book_glossary``: the one the Load Glossary
+    button / auto-load put in effect, else the Glossary Mode's auto-glossary output); None when it uses none.
+    Without an owner: the translator's own lookup with no settings (else the output folder)."""
+    if owner is not None and callable(getattr(owner, '_resolve_book_glossary', None)):
+        try:
+            return owner._resolve_book_glossary(output_dir)
+        except Exception:
+            return None
     try:
         from TransateKRtoEN import find_glossary_file
         found = find_glossary_file(output_dir, settings={})
@@ -1552,8 +1597,18 @@ def find_book_glossary(output_dir):
     return None
 
 
-def load_glossary_entries(output_dir, path=None):
-    path = path or find_book_glossary(output_dir)
+def glossary_resolver(config):
+    """A side-effect-free owner for :func:`find_book_glossary` from a config snapshot (screens that have no
+    owner of their own: the mobile app); None when ``run_env`` is not importable."""
+    try:
+        from run_env import GlossaryResolver
+        return GlossaryResolver(config)
+    except Exception:
+        return None
+
+
+def load_glossary_entries(output_dir, path=None, owner=None):
+    path = path or find_book_glossary(output_dir, owner)
     if not path:
         return []
     try:

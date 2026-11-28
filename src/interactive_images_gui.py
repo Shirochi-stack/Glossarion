@@ -551,7 +551,7 @@ class PlaceholderTextDialog(QDialog):
         # the {tokens} of this text (and the placeholders its note names) look like links with a tooltip
         self._token_links = link_placeholders(
             self.editor, lambda: core.PLACEHOLDER_TEXT_TOKENS.get(self.name, ()),
-            lambda name: core.describe_placeholder(name, _config(self.owner)))
+            lambda name: core.describe_placeholder(name, _config(self.owner), owner=self.owner))
         self._note_names = (set(core.PLANNER_PLACEHOLDERS) | set(core.IMAGE_PLACEHOLDERS)
                             | set(core.PLACEHOLDER_TOKEN_DESCRIPTIONS) | {item['name'] for item in self.items})
         self.status = QLabel("")
@@ -823,7 +823,7 @@ class InteractiveImagesDialog(QDialog):
         image_row = QHBoxLayout()
         image_row.addWidget(QLabel("Image model:"))
         self.image_model_combo = QComboBox()
-        _model_combo(self.image_model_combo, "Image Gen / Edit key pool model")
+        _model_combo(self.image_model_combo, "Image Gen / Edit pool model, else the text model")
         self.image_model_combo.setEditText(str(config.get('interactive_images_image_model', '') or ''))
         self.image_model = self.image_model_combo
         image_row.addWidget(self.image_model, 1)
@@ -914,7 +914,7 @@ class InteractiveImagesDialog(QDialog):
         config = dict(_config(self.owner), interactive_images_per_chapter=self.per_chapter.currentText(),
                       interactive_images_subjects=self.subjects.currentText(),
                       interactive_images_include_gender=bool(self.gender_cb.isChecked()))
-        return core.describe_placeholder(name, config, self.references.output_dir, field)
+        return core.describe_placeholder(name, config, self.references.output_dir, field, self.owner)
 
     # ---- Auto aspect ratio / gallery --------------------------------------------------------------
     def _sync_ratios_button(self, *_args):
@@ -1063,6 +1063,11 @@ class ReferencesEditor(QGroupBox):
         note.setWordWrap(True)
         note.setStyleSheet("color: gray; font-size: 9pt;")
         layout.addWidget(note)
+        self.glossary_label = QLabel("")
+        self.glossary_label.setWordWrap(True)
+        self.glossary_label.setStyleSheet("color: gray; font-size: 9pt;")
+        self.glossary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.glossary_label)
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Character", "Images", "", ""])
@@ -1076,11 +1081,8 @@ class ReferencesEditor(QGroupBox):
         self.name_edit = _line(placeholder="Character name")
         add_char = _button("+ Character", 'success')
         add_char.clicked.connect(self._add_character)
-        load_names = _button("Load names from glossary", 'info')
-        load_names.clicked.connect(self._load_names)
         char_row.addWidget(self.name_edit, 1)
         char_row.addWidget(add_char)
-        char_row.addWidget(load_names)
         layout.addLayout(char_row)
 
         style_row = QHBoxLayout()
@@ -1102,7 +1104,13 @@ class ReferencesEditor(QGroupBox):
             self.book_combo.addItem(label, folder)
             self.book_combo.setItemData(self.book_combo.count() - 1, folder, Qt.ToolTipRole)
         self.book_combo.currentIndexChanged.connect(lambda _i: self._load(self.book_combo.currentData()))
+        self._glossary_signature = None
         self._load(self.book_combo.currentData())
+        # the characters follow the glossary translation uses (it changes with Load Glossary / the mode / a new run)
+        self._glossary_timer = QTimer(self)
+        self._glossary_timer.setInterval(2000)
+        self._glossary_timer.timeout.connect(self._poll_glossary)
+        self._glossary_timer.start()
 
     def _browse(self):
         folder = QFileDialog.getExistingDirectory(self, "Select the book's output folder")
@@ -1114,16 +1122,44 @@ class ReferencesEditor(QGroupBox):
     def _load(self, folder):
         self.output_dir = folder or None
         self.refs = core.load_references(folder) if folder else core.empty_references()
+        self._glossary_signature = None
         self._render()
+
+    def glossary_path(self):
+        """The glossary translation uses for this book now (the main window's Load Glossary / auto-load / Glossary
+        Mode, resolved like translation does), or None."""
+        return core.find_book_glossary(self.output_dir, self.owner) if self.output_dir else None
+
+    def _glossary_state(self):
+        path = self.glossary_path()
+        signature = ipc.progress_signature(path) if path else None
+        return path, (path, signature)
+
+    def _poll_glossary(self):
+        if not self.isVisible() or not self.output_dir:
+            return
+        _path, signature = self._glossary_state()
+        if signature != self._glossary_signature:
+            self._render()
 
     def _render(self):
         enabled = bool(self.output_dir)
         self.table.setEnabled(enabled)
         self.table.setRowCount(0)
-        for name, paths in core.reference_rows(self.refs):
+        path, self._glossary_signature = self._glossary_state() if enabled else (None, None)
+        entries = core.load_glossary_entries(self.output_dir, path) if path else []
+        self.glossary_label.setText(
+            "Characters from the glossary translation uses for this book: " + path if path else
+            "No glossary in use for this book (translation uses none), so no characters are listed from one."
+            if enabled else "")
+        for name, paths, in_glossary in core.reference_rows_with_glossary(
+                self.refs, core.character_names(entries)):
             row = self.table.rowCount()
             self.table.insertRow(row)
-            self.table.setItem(row, 0, QTableWidgetItem(name))
+            label = QTableWidgetItem(name if in_glossary else f"{name}  (not in glossary)")
+            if not in_glossary:
+                label.setToolTip("This name is not in the glossary any more; its images are kept.")
+            self.table.setItem(row, 0, label)
             names = ', '.join(os.path.basename(p) for p in paths) or '(none)'
             item = QTableWidgetItem(f"{len(paths)}: {names}")
             item.setToolTip('\n'.join(paths))
@@ -1158,17 +1194,6 @@ class ReferencesEditor(QGroupBox):
             return
         core.add_reference_names(self.refs, [name])
         self.name_edit.clear()
-        self._render()
-
-    def _load_names(self):
-        if not self._need_book():
-            return
-        entries = core.load_glossary_entries(self.output_dir)
-        names = core.character_names(entries)
-        if not names:
-            QMessageBox.information(self, "Reference images", "No character names found in this book's glossary.")
-            return
-        core.add_reference_names(self.refs, names)
         self._render()
 
     def _add_images(self, name):
@@ -1526,7 +1551,7 @@ class InteractiveImagesGalleryDialog(QDialog):
         ipc.reload_progress(self.model)
         self.images = ipc.gallery_images(self.model)
         self._by_id = {image.id: image for image in self.images}
-        names = core.character_names(core.load_glossary_entries(self.output_dir))
+        names = core.character_names(core.load_glossary_entries(self.output_dir, owner=self.owner))
         self._fill_combo(self.character_combo, [(ALL_CHARACTERS, '')] +
                          [(name, name) for name in ipc.gallery_characters(self.images, names)])
         self._fill_combo(self.chapter_combo, [(ALL_CHAPTERS, '')] +
@@ -1712,13 +1737,16 @@ def start_run(owner, output_dir, keys=None):
     bridge = run_bridge(owner)
     stop = threading.Event()
     batch = batch_settings_from_owner(owner)   # the translation's batch fields, read here on the GUI thread
+    # the glossary translation uses for this book (the Load Glossary button / auto-load / Glossary Mode), also
+    # resolved here: it reads the main window's controls
+    glossary_path = core.find_book_glossary(output_dir, owner) or ''
 
     def work():
         try:
             result = run_interactive_images(
                 _config(owner), output_dir, keys, log=lambda message: _log(owner, message), stop_event=stop,
                 on_progress=lambda key, status: bridge.progress.emit(output_dir, key, status),
-                recompile=owner_recompiler(owner), batch=batch)
+                recompile=owner_recompiler(owner), batch=batch, glossary_path=glossary_path)
         except Exception as exc:
             _log(owner, f"❌ Interactive Images failed: {exc}\n{traceback.format_exc()}")
             result = exc

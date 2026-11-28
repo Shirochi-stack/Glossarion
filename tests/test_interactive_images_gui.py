@@ -512,3 +512,34 @@ def test_styles_button_shows_its_ampersand(tmp_path):
     buttons = [b for b in host.findChildren(QPushButton) if 'Preview' in b.text()]
     assert buttons and buttons[0].text().endswith('Styles && Preview\u2026')
     host.deleteLater()
+
+
+def test_references_list_the_translation_glossary_automatically_with_no_load_button(tmp_path):
+    """The References section lists the characters of the glossary translation uses for the book (no Load /
+    pick-a-glossary button), follows the glossary file, and keeps names that have images when they leave it."""
+    from PySide6.QtWidgets import QPushButton
+
+    import interactive_images_gui as ixg
+
+    _app()
+    glossary = tmp_path / 'glossary.csv'
+    glossary.write_text('type,raw_name,translated_name\ncharacter,a,Mira\ncharacter,b,Tomas\n', encoding='utf-8')
+    owner = _owner()
+    owner._resolve_book_glossary = lambda output_dir, source_path=None: str(glossary) if glossary.exists() else None
+    editor = ixg.ReferencesEditor(owner, output_dir=str(tmp_path))
+
+    def names():
+        return [editor.table.item(row, 0).text() for row in range(editor.table.rowCount())]
+
+    assert names() == ['Mira', 'Tomas'] and str(glossary) in editor.glossary_label.text()
+    texts = [button.text().lower() for button in editor.findChildren(QPushButton)]
+    assert not [text for text in texts if 'glossary' in text] and any('+ character' in text for text in texts)
+    editor.refs['characters']['Tomas'] = ['references/tomas_1.png']
+    editor.show()
+    glossary.write_text('type,raw_name,translated_name\ncharacter,a,Mira\n', encoding='utf-8')
+    editor._poll_glossary()                        # the glossary file changed: the list follows it
+    assert names() == ['Mira', 'Tomas  (not in glossary)']
+    glossary.unlink()
+    editor._poll_glossary()
+    assert 'No glossary in use' in editor.glossary_label.text()
+    editor.deleteLater()

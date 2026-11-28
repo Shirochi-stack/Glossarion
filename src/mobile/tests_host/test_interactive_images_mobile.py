@@ -388,9 +388,11 @@ def test_tools_screen_references_for_a_book(tmp_path):
         try:
             screen.set_target(tg.ToolTarget(title="Lantern", folder=str(folder)))
             await screen.load_references()
-            assert await screen.load_names() == 2
-            refs = json.loads((folder / "Interactive_Images" / "references.json").read_text(encoding="utf-8"))
-            assert sorted(refs["characters"]) == ["Mira", "Tomas"]
+            # no loader: the characters of the glossary translation uses are listed on their own
+            assert not hasattr(screen, "load_names")
+            assert [c.key for c in screen.refs_list.controls] == ["ix-ref-Mira", "ix-ref-Tomas"]
+            assert screen.glossary_file == str(folder / "glossary.csv")
+            assert "glossary.csv" in screen.glossary_note.value and screen.glossary_note.visible
             added = await screen.add_images("Mira")
             assert added == ["references/mira_1.png"]
             assert any("Not a PNG" in note for note in ctx.notes)
