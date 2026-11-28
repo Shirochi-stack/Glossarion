@@ -212,7 +212,7 @@ def test_run_builds_images_classes_and_records_entries(book):
     # the image request: the template filled with the scene, the matched names and the references in slot order
     image_requests = [m for kind, _c, m in sent if kind == 'image']
     first = image_requests[0][-1]['content']
-    assert first[0]['text'] == "A lantern gate at dusk\nCharacters: Mira, Tomas\nImage 1: Mira\nImage 2: art style"
+    assert first[0]['text'] == "Art style: Anime illustration, clean line art, cel shading\nA lantern gate at dusk\nCharacters: Mira, Tomas\nImage 1: Mira\nImage 2: art style"
     assert [part['type'] for part in first] == ['text', 'image_url', 'image_url']
     assert all(c == runner.IMAGE_CONTEXT for kind, c, _m in sent if kind == 'image')
     assert all(c == runner.PLAN_CONTEXT for kind, c, _m in sent if kind == 'text')

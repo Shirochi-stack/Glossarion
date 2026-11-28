@@ -1472,7 +1472,8 @@ def load_images_view(service: Any, book: Mapping[str, Any], *, previous: Optiona
     model = previous.state if previous is not None and previous.state is not None \
         and _same_folder(previous.output_dir, folder) else None
     if model is None:
-        model = ipc.open_progress(folder)
+        # the glossary's skip settings (special files, title/header-only) from the user's config
+        model = ipc.open_progress(folder, ipc.glossary_skip_rules(service.config_snapshot()))
     else:
         ipc.reload_progress(model)
     rows = ipc.image_rows(model)

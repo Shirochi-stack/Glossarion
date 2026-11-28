@@ -69,7 +69,8 @@ def run(ctx: Any) -> dict:
     folder = folders[0]
     ctx.set_output_dir(folder)
     keys = ctx.params.get("keys")
-    total = len(keys) if keys is not None else len(ipc.pending_keys(ipc.open_progress(folder)))
+    rules = ipc.glossary_skip_rules(config, owner)   # chapters glossary extraction skips are not built
+    total = len(keys) if keys is not None else len(ipc.pending_keys(ipc.open_progress(folder, rules)))
     done = [0]
     ctx.phase("Illustrating")
     ctx.host.emit("progress", label="Illustrating", completed=0, total=total)
@@ -81,7 +82,7 @@ def run(ctx: Any) -> dict:
     result = runner.run_interactive_images(
         config, folder, keys, log=ctx.log, stop_event=_CtxStop(ctx), on_progress=on_progress,
         recompile=runner.owner_recompiler(owner), batch=runner.batch_settings_from_owner(owner),
-        glossary_path=core.find_book_glossary(folder, owner) or "")
+        glossary_path=core.find_book_glossary(folder, owner) or "", skip_rules=rules)
     summary = {"processed": result.processed, "completed": result.completed, "failed": result.failed,
                "rejected": result.rejected, "skipped": result.skipped, "images": result.images,
                "stopped": result.stopped}

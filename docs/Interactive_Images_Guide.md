@@ -94,6 +94,7 @@ Watch the log. Each finished chapter shows ✅, and the book is recompiled at th
 | **Images per chapter** | How many pictures the planner may pick per chapter. **0** = styles only, no image model needed | 1 |
 | **Include gender with character names** | Sends a character's gender with their name when it is certain (section 7) | On |
 | **Image subjects** | **characters** (people), **backgrounds** (scenery only, no people) or **both** | characters |
+| **Art style** | The look of every picture, sent through `{art_style}` in the image prompt (the default image prompt starts with an `Art style:` line). Stored per profile. Empty removes that line and the image model picks its own style | `Anime illustration, clean line art, cel shading` |
 | **Text model** | Model for the planner (and for writing styles from a prompt). Empty = main translation model | empty |
 | **Image model** | Model that draws the pictures. Empty = the first Image Gen/Edit pool model (when the pool is on), else the **text model**, if it is not known to answer in text only. A model that cannot be told apart (a custom prefix) is tried with one real image request first; if no picture comes back the run stops with a message instead of planning every chapter. A text-only model (for example DeepSeek) is never used: set an image model, or set Images per chapter to 0 | empty |
 | **🔑 Image Keys** | Opens the Image Gen/Edit key pool (section 13) | — |
@@ -149,6 +150,8 @@ The way gender is written (`{name} ({gender})`, and the words `male` / `female`)
 
 ## 8. Prompts, profiles and placeholders
 
+The default **Image** prompt is `Art style: {art_style}`, then the scene, the characters and the reference list, so the pictures come out in the art style instead of whatever the image model defaults to. A profile that still holds the earlier default (without the art style line) gets the new one; a prompt you edited is left as it is.
+
 The settings window has four prompt tabs:
 
 | Tab | Used for |
@@ -172,10 +175,12 @@ The settings window has four prompt tabs:
 | `{css_classes}` | The style classes the current style defines |
 | `{scene_prompt}` | What the planner said the picture shows |
 | `{characters}` | The characters in this picture, with gender when certain |
+| `{art_style}` | The profile's *Art style* text (an empty text removes its line) |
+| `{glossary_entries}` | One line per glossary entry this picture needs: the picture's characters, plus any glossary entry (a place, a term, ...) whose translated name appears as a whole word in the scene description. Glossary order, each once. No relevant entry removes its line. Not in the default image prompt: add it where you want it |
 | `{reference_list}` | One line per reference picture, e.g. `Image 1: Lee Seo-yun` |
 | `{user_request}` | Your description when writing a new style |
 
-**Placeholder texts** (✏ Placeholder texts…) are the small pieces some placeholders are made of: the gender format and words, the *Image subjects* texts, the reference-line format and the `art style` label for style references. Right-click any prompt box → **Available placeholders** / **Edit placeholder text…** to change them.
+**Placeholder texts** (✏ Placeholder texts…) are the small pieces some placeholders are made of: the gender format and words, the *Image subjects* texts, the reference-line format, the `art style` label for style references and the **glossary entry line** (`{name}: {description}`, the format of each `{glossary_entries}` line; an entry without a description is just its name). Right-click any prompt box → **Available placeholders** / **Edit placeholder text…** to change them.
 
 > Glossarion sends **only** your prompt text and what the placeholders expand to. It never adds hidden sentences of its own.
 
@@ -203,7 +208,7 @@ To use a style: tick **Interactive styles** in Other Settings and pick it in the
 
 ## 10. The Progress Manager tab
 
-**Progress Manager → 🖼 Interactive Images** lists **every chapter whose translation is completed** (chapters that are image-only, empty, skipped, failed or still translating are left out), including chapters you have not built yet. The tab label counts built chapters (Completed and Styles only) out of that list, for example `🖼 Interactive Images (12/39)`, plus `, 2 stale` when chapters changed since they were built. It shows the count before you open the tab.
+**Progress Manager → 🖼 Interactive Images** lists **every chapter whose translation is completed**, in the book's **reading order (the OPF spine)** (chapters that are image-only, empty, skipped, failed or still translating are left out; each row shows its place in the book like the Translation tab, `[003]`), including chapters you have not built yet. The tab label counts built chapters (Completed and Styles only) out of that list, for example `🖼 Interactive Images (12/39)`, plus `, 2 stale` when chapters changed since they were built. It shows the count before you open the tab.
 
 | Status | Meaning |
 |---|---|
@@ -213,6 +218,8 @@ To use a style: tick **Interactive styles** in Other Settings and pick it in the
 | **Failed** | The planner or the image model failed; see the reason |
 | **Rejected** | The changes would have altered the chapter's text, so nothing was written |
 | **Stale** | The chapter was retranslated after it was built; rebuild it |
+
+**What is skipped:** Interactive Images skips exactly what glossary extraction skips. A chapter is not listed, not counted and never sent to the planner (the log says `⏭️ ... skipped: image-only` and so on) when its translated page is **image-only** or **empty**, or **title/header-only** (only while the Glossary setting *Skip title/header-only chapters* is on), or when its source file is a **special file** (cover, title page, copyright, notice, ...) and the translation setting *Translate special files* is off, with the same keyword lists and the same "never treat in-between files as special" rule the glossary uses.
 
 **Buttons:** **▶ Build pending** (Not built, Failed, Partial, Rejected and Stale chapters), **Stop**, **Settings**, **🎨 Styles**, **🖼 Gallery**, **Refresh**. The stats chips at the top filter the list.
 
@@ -260,7 +267,7 @@ Everything lives in the book's output folder, inside **`Interactive_Images/`**:
 
 | File | What it is |
 |---|---|
-| `Glossarion_ch012_1.png` | Picture 1 of chapter 12 (rebuilding a chapter replaces its pictures) |
+| `Glossarion_ch012_1.png` | Picture 1 of the chapter at **position 12 in the book** (its place in the OPF reading order, so two chapters never share a name, even ones without a chapter number such as notices; rebuilding a chapter replaces its pictures). Books without an OPF use the chapter number, or the list order when numbers repeat. Pictures made by an older version were named by chapter number and are not renamed: their chapters show as stale until rebuilt |
 | `glossarion_interactive.css` | The book's interactive stylesheet |
 | `interactive_images_progress.json` | The progress list |
 | `references/` | Copies of your reference images |

@@ -152,11 +152,14 @@ def book_signature(output_dir):
 @dataclass
 class TranslatedChapter:
     key: str                 # output file name (the progress key)
-    number: int              # chapter number used in image names
+    number: int              # the chapter number (the gender tracker's key; not unique: every notice is 0)
     output_file: str
     path: str
     status: str              # translation status
     title: str = ''
+    position: int = 0        # 1-based position in the book (OPF spine): unique, names the images
+    source_name: str = ''    # the source file the chapter came from (``original_basename``)
+    skip_reason: str = ''    # why glossary extraction would skip it too ('' = not skipped)
 
 
 def _chapter_number(entry, output_file, fallback):
@@ -173,9 +176,90 @@ def _chapter_number(entry, output_file, fallback):
     return fallback
 
 
-def translated_chapters(output_dir, *, completed_only=False):
-    """The book's chapter outputs (HTML) from ``translation_progress.json``, in chapter order. ``status`` is
-    the translation status; merged chapters (their parent's file) are left out."""
+def _stem(name):
+    return os.path.splitext(os.path.basename(str(name or '')))[0].casefold()
+
+
+def glossary_skip_rules(config=None, owner=None):
+    """The glossary's skip rules as ``{'skip_title_header_only': bool, 'special': settings}``: what
+    glossary extraction skips, read from the user's settings the way the glossary run reads them.
+
+    ``owner`` (the desktop window or a HeadlessOwner): its own run-environment values; otherwise the
+    ``config`` keys (the mobile app's snapshot). Neither: the defaults (title/header-only skipped, special
+    files skipped with the default keyword lists)."""
+    from epub_special_files import glossary_special_file_settings, glossary_special_file_settings_for_owner
+
+    config = config if isinstance(config, dict) else (getattr(owner, 'config', None) or {})
+    skip_title = config.get('glossary_skip_title_header_only', True)
+    value = getattr(owner, '_glossary_skip_title_header_only_env_value', None)
+    if callable(value):
+        try:
+            skip_title = value() == '1'
+        except Exception:
+            pass
+    if owner is not None and hasattr(owner, 'translate_special_files_var'):
+        special = glossary_special_file_settings_for_owner(owner)
+    else:
+        special = glossary_special_file_settings({
+            'TRANSLATE_SPECIAL_FILES': '1' if config.get('translate_special_files') else '0',
+            'SPECIAL_FILE_KEYWORDS': str(config.get('special_file_keywords') or ''),
+            'SPECIAL_FILE_EXACT': str(config.get('special_file_exact') or ''),
+            'GLOSSARY_NEVER_CONSIDER_IN_BETWEEN_FILES_AS_SPECIAL': '1' if config.get(
+                'never_consider_in_between_files_as_special', True) else '0',
+        })
+    if isinstance(skip_title, str):
+        skip_title = skip_title.strip().lower() in ('1', 'true', 'yes', 'on')
+    return {'skip_title_header_only': bool(skip_title), 'special': special}
+
+
+def book_spine(output_dir):
+    """The book's OPF spine (HTML file names in reading order); [] when the book has no OPF (text, PDF, ...).
+    The translation's own spine reader (workspace ``content.opf``, then the source EPUB)."""
+    try:
+        from TransateKRtoEN import _single_pass_spine_files
+        return list(_single_pass_spine_files(output_dir) or [])
+    except Exception:
+        return []
+
+
+_STRUCTURE_CACHE = {}
+
+
+def _structural_kind(path):
+    """The glossary's structural kind of a chapter file (``image_only`` / ``title_header_only`` / ``empty`` / ''),
+    cached per file signature."""
+    sig = progress_signature(path)
+    cached = _STRUCTURE_CACHE.get(path)
+    if cached and cached[0] == sig:
+        return cached[1]
+    try:
+        from epub_special_files import classify_glossary_html_document
+        with open(path, 'rb') as handle:
+            kind = classify_glossary_html_document(handle.read())['structural_kind']
+    except Exception:
+        kind = ''
+    _STRUCTURE_CACHE[path] = (sig, kind)
+    return kind
+
+
+_SKIP_LABELS = {'image_only': 'image-only', 'empty': 'empty', 'title_header_only': 'title/header-only'}
+
+
+def chapter_skip_reason(path, rules):
+    """Why glossary extraction would skip the chapter at ``path`` for its structure ('' = it would not):
+    the glossary's own classification (``epub_special_files.classify_glossary_html_document``) of the
+    translated HTML; title/header-only only while the glossary's skip setting is on."""
+    kind = _structural_kind(path)
+    if kind == 'title_header_only' and not (rules or {}).get('skip_title_header_only', True):
+        return ''
+    return _SKIP_LABELS.get(kind, '')
+
+
+def translated_chapters(output_dir, *, completed_only=False, rules=None):
+    """The book's chapter outputs (HTML) from ``translation_progress.json``, in the book's reading order (the OPF
+    spine; chapters the spine does not name follow, by chapter number). ``status`` is the translation status;
+    merged chapters (their parent's file) are left out. ``position`` is the unique 1-based place in the book;
+    ``skip_reason`` says why the glossary skips a chapter (``rules``: :func:`glossary_skip_rules`)."""
     path = os.path.join(output_dir, 'translation_progress.json')
     try:
         with open(path, 'r', encoding='utf-8') as handle:
@@ -200,9 +284,47 @@ def translated_chapters(output_dir, *, completed_only=False):
             continue
         seen.add(output_file)
         out.append(TranslatedChapter(output_file, _chapter_number(entry, output_file, index + 1), output_file,
-                                     full, status, str(entry.get('title') or '')))
-    out.sort(key=lambda chapter: (chapter.number, chapter.key))
+                                     full, status, str(entry.get('title') or ''),
+                                     source_name=os.path.basename(str(entry.get('original_basename') or ''))))
+    _place_in_book(out, output_dir, rules if rules is not None else glossary_skip_rules())
     return out
+
+
+def _place_in_book(chapters, output_dir, rules):
+    """Order ``chapters`` by the OPF spine, set each one's ``position``, and mark the ones the glossary skips."""
+    from epub_special_files import glossary_special_file_flags
+
+    spine = book_spine(output_dir)
+    index_of = {}
+    for index, name in enumerate(spine):
+        index_of.setdefault(_stem(name), index)
+    flags = glossary_special_file_flags(spine, rules['special']) if spine else []
+    order = {}
+    for chapter in chapters:
+        stem = _stem(chapter.source_name)
+        hit = index_of.get(stem) if stem else None
+        if hit is None:
+            hit = index_of.get(re.sub(r'^response_', '', _stem(chapter.output_file)))
+        if hit is not None:
+            order[chapter.key] = hit
+            chapter.source_name = os.path.basename(spine[hit])
+    chapters.sort(key=lambda c: (order[c.key] if c.key in order else len(spine), c.number, c.key))
+    unmatched = [c for c in chapters if c.key not in order]
+    for chapter in chapters:
+        if chapter.key in order:
+            chapter.position = order[chapter.key] + 1
+    if unmatched:
+        # no spine place: keep the chapter number as the position when every number is distinct (the old
+        # names), else count on after the spine so that no two chapters share a name
+        numbers = [c.number for c in unmatched]
+        distinct = not spine and len(set(numbers)) == len(numbers) and min(numbers) > 0
+        for offset, chapter in enumerate(unmatched, 1):
+            chapter.position = chapter.number if distinct else len(spine) + offset
+    for chapter in chapters:
+        if chapter.key in order and flags[order[chapter.key]]:
+            chapter.skip_reason = 'special file'
+        elif translation_completed(chapter):   # only chapters the step can build are classified
+            chapter.skip_reason = chapter_skip_reason(chapter.path, rules)
 
 
 def translation_completed(chapter):
@@ -215,9 +337,12 @@ UNLISTED_TRANSLATION_STATUSES = ('completed_image_only', 'completed_empty')
 
 def chapter_listed(chapter):
     """Whether the Interactive Images list shows a chapter: its translation completed (the chapters the
-    runner can build) and is not an image-only or empty copy. A chapter listed without an images entry is
-    a "Not built" row; skipped, failed, QA-failed and in-progress translations are not listed."""
-    return translation_completed(chapter) and str(chapter.status or '') not in UNLISTED_TRANSLATION_STATUSES
+    runner can build), is not an image-only or empty copy, and is not one the glossary skips
+    (``skip_reason``: a special file, an image-only / empty / title-header-only document). A chapter listed
+    without an images entry is a "Not built" row; skipped, failed, QA-failed and in-progress translations
+    are not listed."""
+    return (translation_completed(chapter) and str(chapter.status or '') not in UNLISTED_TRANSLATION_STATUSES
+            and not chapter.skip_reason)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -231,6 +356,7 @@ class ImagesModel:
     data: dict
     chapters: List[TranslatedChapter] = field(default_factory=list)
     _hash_cache: dict = field(default_factory=dict)
+    rules: Any = None          # glossary_skip_rules(); None = the defaults
 
     def _read(self, chapter):
         """``(visible-text hash, has Glossarion markup)`` of a chapter file now (cached per file signature)."""
@@ -256,15 +382,18 @@ class ImagesModel:
         return self._read(chapter)[1]
 
 
-def open_progress(output_dir):
-    """The book's images progress (an empty one when no file exists yet)."""
+def open_progress(output_dir, rules=None):
+    """The book's images progress (an empty one when no file exists yet). ``rules``: the glossary's skip rules
+    (:func:`glossary_skip_rules` of the user's settings; None = the defaults)."""
     path = core.progress_path(output_dir)
-    return ImagesModel(output_dir, path, read_progress_file(path), translated_chapters(output_dir))
+    rules = rules if rules is not None else glossary_skip_rules()
+    return ImagesModel(output_dir, path, read_progress_file(path), translated_chapters(output_dir, rules=rules),
+                       rules=rules)
 
 
 def reload_progress(model):
     model.data = read_progress_file(model.path)
-    model.chapters = translated_chapters(model.output_dir)
+    model.chapters = translated_chapters(model.output_dir, rules=model.rules)
     return model.data
 
 
@@ -306,7 +435,7 @@ def entry_status(model, chapter, entry=None):
 def row_display(chapter, status, images):
     count = f"{images} image{'s' if images != 1 else ''}" if images else "no images"
     label = STATUS_LABELS.get(status, status)
-    return f"{STATUS_ICONS.get(status, '⬜')} Ch.{chapter.number:>4} │ {chapter.key} │ {count} │ {label}"
+    return f"{STATUS_ICONS.get(status, '⬜')} [{chapter.position:03d}] Ch.{chapter.number:>4} │ {chapter.key} │ {count} │ {label}"
 
 
 def image_rows(model, chapters=None):
@@ -476,7 +605,7 @@ def delete_entries(output_dir, targets, strip_html=True):
         entry = (data.get('chapters') or {}).get(key) or {}
         files = [image.get('file') for image in entry.get('images') or () if image.get('file')]
         if chapter is not None:
-            files.extend(core.chapter_images_on_disk(output_dir, chapter.number))
+            files.extend(core.chapter_images_on_disk(output_dir, chapter.position))
             if strip_html:
                 strip_chapter_file(chapter.path)
         for name in set(files):
@@ -502,7 +631,7 @@ def delete_entries(output_dir, targets, strip_html=True):
 class GalleryImage:
     id: str                    # '<chapter key>|<file>': unique within a book
     key: str                   # the chapter's output file name
-    chapter_number: int
+    chapter_number: int        # the chapter's position in the book (image names; shown as "Ch. n")
     chapter_title: str
     index: int                 # 1-based position among the chapter's images
     file: str                  # file name inside Interactive_Images/
@@ -535,7 +664,7 @@ def gallery_images(model):
             if not os.path.isfile(full):
                 continue
             names = image.get('scene') or image.get('characters') or []
-            out.append(GalleryImage(f"{chapter.key}|{name}", chapter.key, chapter.number, chapter.title, index, name,
+            out.append(GalleryImage(f"{chapter.key}|{name}", chapter.key, chapter.position, chapter.title, index, name,
                                     full, [str(n) for n in names if n], str(image.get('prompt') or ''),
                                     str(image.get('aspect_ratio') or '')))
     out.sort(key=lambda item: (item.chapter_number, item.key, item.index))
@@ -793,6 +922,7 @@ __all__ = [
     'open_progress', 'open_targets', 'pending_keys', 'plan_text', 'progress_signature', 'read_progress_file',
     'reload_progress', 'set_book_info', 'set_entry', 'set_status', 'strip_chapter_file', 'tab_count_text',
     'translated_chapters', 'translation_completed', 'write_json_atomic', 'write_text_atomic',
+    'book_spine', 'chapter_skip_reason', 'glossary_skip_rules',
     'GalleryDeleteResult', 'GalleryImage', 'delete_gallery_images', 'gallery_chapters', 'gallery_characters',
     'gallery_delete_confirmation', 'gallery_filter', 'gallery_images', 'gallery_thumbnail',
 ]

@@ -66,6 +66,11 @@ NATIVE_NOTE = ("The live preview needs the in-app web view (Android / iOS). Here
 IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp"]
 
 
+def profiles_text(profiles: Any) -> dict:
+    """The selected profile's staged texts ({} without profiles)."""
+    return dict(profiles.texts) if profiles is not None else {}
+
+
 def _core() -> Any:
     import interactive_images_core
 
@@ -483,6 +488,10 @@ class InteractiveImagesScreen(Screen):
         self.per_chapter = ft.Dropdown(label="Images per chapter", dense=True, width=180, key="ix-per-chapter",
                                        options=[ft.DropdownOption(key=v, text=v) for v in core.PER_CHAPTER_CHOICES],
                                        on_select=lambda e: self.set_per_chapter(e.control.value))
+        self.art_style = ft.TextField(label="Art style", dense=True, key="ix-art-style", expand=True,
+                                      hint_text=core.DEFAULTS["interactive_images_art_style"],
+                                      on_blur=lambda e: self.set_art_style(e.control.value),
+                                      on_submit=lambda e: self.set_art_style(e.control.value))
         self.bar = ProfileBar(self.ctx, "interactive_images", prompt_keys=core.InteractiveImagesProfiles.RUNTIME_KEYS,
                               source=InteractiveImagesProfileSource(self.ctx), label="Interactive Images profile",
                               fields=core.InteractiveImagesProfiles.FIELDS, noun="interactive images",
@@ -515,7 +524,11 @@ class InteractiveImagesScreen(Screen):
                 ft.Row([self.per_chapter,
                         hint_text("0 = styles only: classes from the book's interactive stylesheet, no image model")],
                        wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                hint_text("Each profile holds the planner, image and CSS prompts and the images per chapter. "
+                self.art_style,
+                hint_text("The look of every picture, sent through {art_style} in the image prompt. An empty text "
+                          "removes that line. Stored per profile."),
+                hint_text("Each profile holds the planner, image and CSS prompts, the images per chapter and the "
+                          "art style. "
                           "The step runs after translation: a chapter whose text would change is rejected."),
             ], icon="TUNE", key="ix-profile-card"),
             card("Prompts", [self.prompt_cards], icon="EDIT_NOTE", key="ix-prompts-card"),
@@ -602,6 +615,8 @@ class InteractiveImagesScreen(Screen):
         builtin = profiles.builtin_texts(name) if profiles is not None else None
         self.per_chapter.value = str(_core().parse_per_chapter(texts.get("per_chapter", "1")))
         self.per_chapter.disabled = profiles is None
+        self.art_style.value = str(texts.get("art_style", "") or "")
+        self.art_style.disabled = profiles is None
         controls = []
         for field_name, heading, _names, key in PROMPT_FIELDS:
             listing = ProfileList(names=[name], texts={name: str(texts.get(field_name, "") or "")},
@@ -613,7 +628,7 @@ class InteractiveImagesScreen(Screen):
                 disabled_reason=self.bar.error if self.bar else None,
                 mono=mono_family(getattr(self.ctx, "page", None)), key=key))
         self.prompt_cards.controls = controls
-        self.ctx.push(self.prompt_cards, self.per_chapter)
+        self.ctx.push(self.prompt_cards, self.per_chapter, self.art_style)
 
     def _stage(self, field_name: str, value: str) -> Optional[str]:
         profiles = self.profiles
@@ -629,6 +644,12 @@ class InteractiveImagesScreen(Screen):
 
     def set_per_chapter(self, value: Any) -> Optional[str]:
         return self._stage("per_chapter", str(_core().parse_per_chapter(value)))
+
+    def set_art_style(self, value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if profiles_text(self.profiles).get("art_style", "") == text:
+            return None
+        return self._stage("art_style", text)
 
     def edit_prompt(self, field_name: str) -> Any:
         from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet

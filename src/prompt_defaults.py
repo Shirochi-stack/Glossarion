@@ -96,7 +96,8 @@ Chapter: {chapter_title}
 
 DEFAULT_INTERACTIVE_IMAGES_IMAGE_SYSTEM_PROMPT = ""
 
-DEFAULT_INTERACTIVE_IMAGES_IMAGE_PROMPT = """{scene_prompt}
+DEFAULT_INTERACTIVE_IMAGES_IMAGE_PROMPT = """Art style: {art_style}
+{scene_prompt}
 Characters: {characters}
 {reference_list}"""
 

@@ -738,7 +738,7 @@ class InteractiveImagesDialog(QDialog):
         row, self.profile_combo, self.profile_buttons = build_prompt_profile_row(
             "Profile:", "interactive_images",
             "Select an Interactive Images profile, or edit its name and save to rename it.\n"
-            "Each profile stores the planner, image and CSS prompts and the images per chapter.",
+            "Each profile stores the planner, image and CSS prompts, the images per chapter and the art style.",
             {'new': self._new_profile, 'save': self._save_profile, 'delete': self._delete_profile},
             self._select_profile)
         layout.addWidget(row)
@@ -789,6 +789,15 @@ class InteractiveImagesDialog(QDialog):
         subject_row.addWidget(self.gallery_btn)
         subject_row.addStretch(1)
         layout.addLayout(subject_row)
+
+        style_row = QHBoxLayout()
+        style_row.addWidget(QLabel("Art style:"))
+        self.art_style = _line(placeholder="e.g. Anime illustration, clean line art, cel shading")
+        self.art_style.setToolTip("The look of every picture, sent through {art_style} in the image prompt "
+                                  "(the default image prompt has an Art style line). Stored per profile. "
+                                  "An empty text removes that line, and the image model chooses the style.")
+        style_row.addWidget(self.art_style, 1)
+        layout.addLayout(style_row)
 
         tabs = QTabWidget()
         self.editors = {}
@@ -912,6 +921,7 @@ class InteractiveImagesDialog(QDialog):
         """What ``{name}`` of the ``field`` prompt says now: the settings as this dialog shows them, the book
         picked in Reference images. Tooltip text only; never sent to a model."""
         config = dict(_config(self.owner), interactive_images_per_chapter=self.per_chapter.currentText(),
+                      interactive_images_art_style=self.art_style.text(),
                       interactive_images_subjects=self.subjects.currentText(),
                       interactive_images_include_gender=bool(self.gender_cb.isChecked()))
         return core.describe_placeholder(name, config, self.references.output_dir, field, self.owner)
@@ -953,6 +963,7 @@ class InteractiveImagesDialog(QDialog):
     def editor_texts(self):
         texts = {name: editor.toPlainText() for name, editor in self.editors.items()}
         texts['per_chapter'] = self.per_chapter.currentText()
+        texts['art_style'] = self.art_style.text().strip()
         return texts
 
     def _show_selected(self):
@@ -960,6 +971,7 @@ class InteractiveImagesDialog(QDialog):
         for name, editor in self.editors.items():
             editor.setPlainText(texts.get(name, ''))
         self.per_chapter.setCurrentText(str(core.parse_per_chapter(texts.get('per_chapter', '1'))))
+        self.art_style.setText(texts.get('art_style', ''))
         self._refresh_row(self.profile_combo, self.profile_buttons, self.profiles,
                           "Restore the built-in '{name}' Interactive Images prompts",
                           "Delete the selected Interactive Images profile")
@@ -1469,7 +1481,7 @@ class InteractiveImagesGalleryDialog(QDialog):
         self.owner = owner
         self.output_dir = output_dir
         self.confirm = confirm
-        self.model = ipc.open_progress(output_dir)
+        self.model = ipc.open_progress(output_dir, ipc.glossary_skip_rules(_config(owner), owner))
         self.images = []
         self._by_id = {}
         self._viewers = []
@@ -1740,13 +1752,15 @@ def start_run(owner, output_dir, keys=None):
     # the glossary translation uses for this book (the Load Glossary button / auto-load / Glossary Mode), also
     # resolved here: it reads the main window's controls
     glossary_path = core.find_book_glossary(output_dir, owner) or ''
+    skip_rules = ipc.glossary_skip_rules(_config(owner), owner)   # the glossary's skip settings, read on this thread
 
     def work():
         try:
             result = run_interactive_images(
                 _config(owner), output_dir, keys, log=lambda message: _log(owner, message), stop_event=stop,
                 on_progress=lambda key, status: bridge.progress.emit(output_dir, key, status),
-                recompile=owner_recompiler(owner), batch=batch, glossary_path=glossary_path)
+                recompile=owner_recompiler(owner), batch=batch, glossary_path=glossary_path,
+                skip_rules=skip_rules)
         except Exception as exc:
             _log(owner, f"❌ Interactive Images failed: {exc}\n{traceback.format_exc()}")
             result = exc
@@ -1783,7 +1797,7 @@ class ImagesFilePanel(QWidget):
         self.owner = owner
         self.window_ref = window
         self.output_dir = output_dir
-        self.model = ipc.open_progress(output_dir)
+        self.model = ipc.open_progress(output_dir, ipc.glossary_skip_rules(_config(owner), owner))
         self._rows = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

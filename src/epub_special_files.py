@@ -109,3 +109,61 @@ def glossary_special_file_env(owner):
 def glossary_special_file_settings_for_owner(owner):
     """``glossary_special_file_settings`` from ``owner``'s settings rather than this process's environment."""
     return glossary_special_file_settings(glossary_special_file_env(owner))
+
+
+# ---------------------------------------------------------------------------
+# The glossary extractor's structural skip decision (image-only / title-header-only / empty documents),
+# shared so that Interactive Images skips exactly the chapters glossary extraction skips.
+# ---------------------------------------------------------------------------
+
+def classify_glossary_html_document(raw_html):
+    """Extract text while identifying documents that need no glossary request."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(raw_html or b"", "html.parser")
+    for tag in soup.find_all(["script", "style", "noscript", "template"]):
+        tag.decompose()
+
+    text = soup.get_text("\n", strip=True)
+    has_images = bool(soup.find(["img", "image"]))
+
+    content_soup = BeautifulSoup(str(soup), "html.parser")
+    for tag in content_soup.find_all(["title", "h1", "h2", "h3", "h4", "h5", "h6"]):
+        tag.decompose()
+    remaining_text = content_soup.get_text("\n", strip=True)
+
+    if has_images and not remaining_text:
+        structural_kind = "image_only"
+    elif text and not remaining_text:
+        structural_kind = "title_header_only"
+    elif not text:
+        structural_kind = "empty"
+    else:
+        structural_kind = ""
+
+    return {
+        "text": text,
+        "structural_kind": structural_kind,
+    }
+
+
+def glossary_structural_progress_statuses(
+    chapter_kinds,
+    *,
+    skip_title_header_only=True,
+):
+    """Map structural EPUB classifications to distinct skip statuses."""
+    statuses = {}
+    for raw_idx, raw_kind in (chapter_kinds or {}).items():
+        try:
+            idx = int(raw_idx)
+        except (TypeError, ValueError):
+            continue
+        kind = str(raw_kind or "").strip().lower()
+        if kind == "image_only":
+            statuses[idx] = "skipped_image_only"
+        elif kind == "empty":
+            statuses[idx] = "skipped_empty"
+        elif kind == "title_header_only" and skip_title_header_only:
+            statuses[idx] = "skipped_title_header_only"
+    return statuses

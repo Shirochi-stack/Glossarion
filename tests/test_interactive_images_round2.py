@@ -196,7 +196,7 @@ def test_placeholder_text_store_round_trip():
     assert core.stored_placeholder_texts({core.PLACEHOLDER_TEXTS_KEY: {'bogus': 'x', 'gender_male': 3}}) == {}
     assert [item['name'] for item in core.placeholder_text_defs()] == [
         'character_gender', 'gender_male', 'gender_female', 'image_subjects_characters', 'image_subjects_backgrounds',
-        'image_subjects_both', 'style_reference', 'reference_line']
+        'image_subjects_both', 'style_reference', 'reference_line', 'glossary_entry_line']
 
 
 # ---------------------------------------------------------------------------------------------
@@ -269,8 +269,8 @@ def test_confident_genders_reach_the_planner_and_the_image_prompt(book):
     assert "Characters in this book:\nMira (female)\nTomas\nHana\n" in planner
     images = [r['messages'][-1]['content'][0]['text'] for r in sent if r['kind'] == 'image']
     # (the template's own empty {reference_list} line leaves the final line break, as before)
-    assert images[0] == "A lantern gate at dusk\nCharacters: Mira (female), Tomas\n"
-    assert images[1] == "Mira at the gate\nCharacters: Mira (female)\n"
+    assert images[0] == "Art style: Anime illustration, clean line art, cel shading\nA lantern gate at dusk\nCharacters: Mira (female), Tomas\n"
+    assert images[1] == "Art style: Anime illustration, clean line art, cel shading\nMira at the gate\nCharacters: Mira (female)\n"
 
 
 def test_gender_off_sends_bare_names(book):
@@ -280,7 +280,7 @@ def test_gender_off_sends_bare_names(book):
     planner = [r for r in sent if r['kind'] == 'text'][0]['messages'][-1]['content']
     assert "Characters in this book:\nMira\nTomas\nHana\n" in planner and '(female)' not in planner
     assert [r['messages'][-1]['content'][0]['text'] for r in sent if r['kind'] == 'image'][0] == \
-        "A lantern gate at dusk\nCharacters: Mira, Tomas\n"
+        "Art style: Anime illustration, clean line art, cel shading\nA lantern gate at dusk\nCharacters: Mira, Tomas\n"
 
 
 def test_backgrounds_mode_clears_characters_and_drops_the_characters_line(book):
@@ -290,7 +290,7 @@ def test_backgrounds_mode_clears_characters_and_drops_the_characters_line(book):
     planner = [r for r in sent if r['kind'] == 'text'][0]['messages'][-1]['content']
     assert core.placeholder_default('image_subjects_backgrounds') in planner
     images = [r['messages'][-1]['content'] for r in sent if r['kind'] == 'image']
-    assert [part[0]['text'] for part in images] == ["A lantern gate at dusk\n", "Mira at the gate\n"]
+    assert [part[0]['text'] for part in images] == ["Art style: Anime illustration, clean line art, cel shading\nA lantern gate at dusk\n", "Art style: Anime illustration, clean line art, cel shading\nMira at the gate\n"]
     entry = ipc.open_progress(str(book)).data['chapters']['response_001_ch1.html']
     assert all(image['characters'] == [] for image in entry['images'])
 
