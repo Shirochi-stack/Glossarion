@@ -313,6 +313,19 @@ def _tab_label(window, name):
     return tabs.tabText(tabs.indexOf(window._pm_tab_pages[name]))
 
 
+def _settled_glossary_label(window, timeout=10.0):
+    """The Glossary tab label once its count (built on a worker thread) is in."""
+    import time
+
+    deadline = time.time() + timeout
+    while True:
+        window._pm_update_glossary_count()
+        label = _tab_label(window, "glossary")
+        if "(" in label or time.time() > deadline:
+            return label
+        pl.pump(5, timeout=0.05)
+
+
 def _label_counts(label):
     done, total = label.rsplit("(", 1)[1].rstrip(")").split("/")
     return int(done), int(total)
@@ -333,7 +346,7 @@ def test_glossary_tab_count_is_completed_over_total_of_the_current_file(tmp_path
     monkeypatch.setattr(rg, "make_glossary_progress_model", recording)
     _host, window, sources = _open(tmp_path, 2)
     window._pm_update_tab_counts()
-    before = _tab_label(window, "glossary")
+    before = _settled_glossary_label(window)
     assert before.startswith("\U0001f4da Glossary (") and "/" in before
     assert built == []  # still lazy: the pre-build number does not build a panel
 
@@ -346,6 +359,26 @@ def test_glossary_tab_count_is_completed_over_total_of_the_current_file(tmp_path
     # the panel reports every change of its legend
     window._pm_set_glossary_count(sources[0], {"total": total + 5, "completed": done + 1})
     assert _label_counts(_tab_label(window, "glossary")) == (done + 1, total + 5)
+
+
+def test_glossary_tab_count_never_blocks_the_ui(tmp_path, monkeypatch):
+    """A slow count build runs on a worker thread: the label update returns at once and the
+    count shows when the build is done."""
+    import time
+
+    rg = pl.current_rg()
+    original = rg.glossary_progress_legend_stats
+
+    def slow(*args, **kwargs):
+        time.sleep(1.0)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(rg, "glossary_progress_legend_stats", slow)
+    _host, window, _sources = _open(tmp_path, 2)
+    started = time.time()
+    window._pm_update_glossary_count()
+    assert time.time() - started < 0.5
+    assert "(" in _settled_glossary_label(window)
 
 
 def test_glossary_tab_count_follows_the_selected_file_and_drops_without_progress(tmp_path):
@@ -361,10 +394,10 @@ def test_glossary_tab_count_follows_the_selected_file_and_drops_without_progress
     window._pm_file_combo.setCurrentIndex(0)
     pl.pump(30, timeout=0.3)
     window._pm_update_tab_counts()
-    first_label = _tab_label(window, "glossary")
+    first_label = _settled_glossary_label(window)
     window._pm_file_combo.setCurrentIndex(1)
     pl.pump(30, timeout=0.3)
-    second_label = _tab_label(window, "glossary")
+    second_label = _settled_glossary_label(window)
     assert _label_counts(first_label) != _label_counts(second_label)
 
     progress.unlink()
