@@ -88,14 +88,15 @@ def test_one_window_one_dropdown_three_tabs(count, tmp_path):
     tabs = window._pm_tabs
     assert [tabs.widget(i)._pm_tab_name for i in range(tabs.count())] == list(TAB_NAMES)
     assert [tabs.tabText(i).split(" (")[0] for i in range(tabs.count())] == [
-        "Translation", "Glossary", "Interactive Images"]
+        "📖 Translation", "📚 Glossary", "🖼 Interactive Images"]
     # no per-file tabs any more: the window's only QTabWidget is the 3-tab one
     assert window.findChildren(QTabWidget) == [tabs]
     combo = window._pm_file_combo
     assert isinstance(combo, QComboBox) and combo.count() == count
     assert [os.path.normcase(f) for f in window._pm_files] == [
         os.path.normcase(os.path.abspath(s)) for s in sources]
-    # the arrows and the "1 / n" counter only show with something to switch to
+    # the file row (dropdown, arrows, "1 / n" counter) only shows with something to switch to
+    assert window._pm_nav.isVisibleTo(window) is (count > 1)
     assert window._pm_nav.prev_button.isVisibleTo(window) is (count > 1)
     assert window._pm_translation_stack.count() == count
 

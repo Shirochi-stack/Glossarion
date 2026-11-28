@@ -8049,9 +8049,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
     # The Progress Manager window: a compact header with one file dropdown shared by
     # every tab, then the Translation / Glossary / Interactive Images tabs.
     _PM_TAB_TITLES = (
-        ('translation', "Translation"),
-        ('glossary', "Glossary"),
-        ('images', "Interactive Images"),
+        ('translation', "📖 Translation"),
+        ('glossary', "📚 Glossary"),
+        ('images', "🖼 Interactive Images"),
     )
 
     def _build_progress_manager_window(
@@ -8160,6 +8160,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             idx = combo.currentIndex()
             count = combo.count()
             nav.update_arrows()
+            nav.setVisible(count > 1)  # one input file: no file row at all
             counter.setVisible(count > 1)
             counter.setText(f"{idx + 1} / {count}")
 
