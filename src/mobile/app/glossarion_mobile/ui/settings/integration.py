@@ -45,6 +45,26 @@ IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES + ("settings.logs", "settings.accou
 _RUNNING_JOB_STATES = ("running", "finishing", "stopping")
 
 
+def custom_route_listener(store: Any) -> Callable[[str, str, str], bool]:
+    """``custom_endpoint_discovery`` listener: a custom prefix whose URL a 404 search corrected goes into
+    the settings store too (its next save would otherwise write the old route back)."""
+
+    def listener(prefix: str, old_url: str, new_url: str) -> bool:
+        import copy
+
+        from custom_endpoint_discovery import PREVIOUS_ROUTING_KEY, apply_route_to_config
+
+        scratch = {key: copy.deepcopy(store.get(key)) for key in ("custom_prefix_routes", PREVIOUS_ROUTING_KEY)
+                   if store.get(key) is not None}
+        if not apply_route_to_config(scratch, prefix, old_url, new_url):
+            return False
+        for key, value in scratch.items():
+            store.set(key, value)
+        return True
+
+    return listener
+
+
 class SettingsFeature:
     def __init__(
         self,
@@ -118,6 +138,12 @@ class SettingsFeature:
         """Create, load and hook the feature into a running ``GlossarionApp``."""
         feature = cls.for_app(app)
         await feature.load()
+        try:
+            from custom_endpoint_discovery import register_route_listener
+
+            register_route_listener(custom_route_listener(feature.store))
+        except Exception:
+            log.exception("registering the custom prefix endpoint listener failed")
         from glossarion_mobile.state import remote_routes
 
         remote_routes.apply_all(feature.prefs)  # U13: antigravity/ and ollamapull/ use the user's PC

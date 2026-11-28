@@ -18576,6 +18576,27 @@ class TranslatorGUI(TranslationPipelineMixin, TextJobsMixin, InputPreparationMix
         self._sync_custom_prefix_routes_env()
         self._save_model_order(list_widget, dialog)
 
+    def _on_custom_prefix_endpoint_found(self, prefix, old_url, new_url):
+        """custom_endpoint_discovery listener: keep a corrected custom prefix route in this owner and config.json.
+
+        Runs on the request thread: no widget is touched. The route table dialog reads the config when it
+        opens, and a later save_config writes ``custom_prefix_routes`` from this owner, so both hold the new URL.
+        """
+        from custom_endpoint_discovery import PREVIOUS_ROUTING_KEY, apply_route_to_config
+        from config_store import update_config_file
+        routes = list(getattr(self, 'custom_prefix_routes', None) or self.config.get('custom_prefix_routes', []))
+        scratch = {'custom_prefix_routes': [dict(r) for r in routes if isinstance(r, dict)],
+                   PREVIOUS_ROUTING_KEY: dict(self.config.get(PREVIOUS_ROUTING_KEY) or {})}
+        if not apply_route_to_config(scratch, prefix, old_url, new_url):
+            return False
+        self.custom_prefix_routes = self._normalize_custom_prefix_routes(scratch['custom_prefix_routes'])
+        self.config['custom_prefix_routes'] = self.custom_prefix_routes
+        self.config[PREVIOUS_ROUTING_KEY] = scratch[PREVIOUS_ROUTING_KEY]
+        self._sync_custom_prefix_routes_env()
+        update_config_file({'custom_prefix_routes': self.custom_prefix_routes,
+                            PREVIOUS_ROUTING_KEY: scratch[PREVIOUS_ROUTING_KEY]})
+        return True
+
     def _create_settings_section(self):
         """Create all settings controls"""
         # Threading delay (with extra spacing at top)
@@ -30492,6 +30513,12 @@ if __name__ == "__main__":
         
         # Initialize the app (modules already available)  
         main_window = TranslatorGUI()
+        try:
+            # A 404 on a custom prefix finds the real endpoint (custom_endpoint_discovery) and tells the owner.
+            from custom_endpoint_discovery import register_route_listener
+            register_route_listener(main_window._on_custom_prefix_endpoint_found)
+        except Exception:
+            pass
 
         should_start_manga_imports = bool(globals().get('manga_available', False)) and not MANGA_SUPPORT
         if should_start_manga_imports:

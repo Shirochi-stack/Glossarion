@@ -346,6 +346,7 @@ app_files = [
     # registers a driver) and the GUI-free release check update_manager inherits (update_core)
     ('browser_driver.py', '.'),
     ('update_core.py', '.'),
+    ('custom_endpoint_discovery.py', '.'),
     # Library cloud (Google Drive sync + Share via link): GUI-free shared core, also used by
     # Glossarion Mobile; the compile hooks in the core desktop modules import it
     ('share_hosting.py', '.'),
@@ -587,6 +588,7 @@ app_modules = [
     # registers a driver) and the GUI-free release check update_manager inherits (update_core)
     'browser_driver',
     'update_core',
+    'custom_endpoint_discovery',
     # Library cloud (Google Drive sync + Share via link): GUI-free shared core, also used by
     # Glossarion Mobile; the compile hooks in the core desktop modules import it
     'share_hosting',

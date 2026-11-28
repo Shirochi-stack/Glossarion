@@ -375,7 +375,7 @@ U8_MANGA_MODULES = (
 # U9: authnd_auth and gemini_free import the browser-driver seam (the mobile WebViewBridge registers
 # a driver; the desktop keeps its QtWebEngine helpers) and update_manager.UpdateManager inherits the
 # GUI-free release check (update_core), all at module level, so every tier ships them.
-U9_SHARED_MODULES = ("browser_driver", "update_core")
+U9_SHARED_MODULES = ("browser_driver", "update_core", "custom_endpoint_discovery")
 #: Desktop or shared module -> the U9 cores it imports at module level.
 U9_IMPORTERS = {
     "authnd_auth": ("browser_driver",),

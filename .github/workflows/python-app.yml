@@ -183,6 +183,7 @@ jobs:
           tests/test_relations_desktop_ui.py \
           tests/test_glossary_placeholder_texts.py \
           tests/test_placeholder_links.py \
+          tests/test_custom_endpoint_discovery.py \
           tests/parity/test_u9_extractions.py \
           tests/parity/test_u9_gap_moves.py \
           tests/parity/test_u9_gap_round3.py \
@@ -242,6 +243,8 @@ jobs:
             "instance_plan", "instance_worker",
             # Relations Tracker rules (extractor, translator, desktop and mobile share them)
             "relations_tracking",
+            # a 404 on a custom prefix searches the real endpoint (desktop and mobile share it)
+            "custom_endpoint_discovery",
         )
         failed = []
         for name in SHARED:
