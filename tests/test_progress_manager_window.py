@@ -88,14 +88,15 @@ def test_one_window_one_dropdown_three_tabs(count, tmp_path):
     tabs = window._pm_tabs
     assert [tabs.widget(i)._pm_tab_name for i in range(tabs.count())] == list(TAB_NAMES)
     assert [tabs.tabText(i).split(" (")[0] for i in range(tabs.count())] == [
-        "Translation", "Glossary", "Interactive Images"]
+        "📖 Translation", "📚 Glossary", "🖼 Interactive Images"]
     # no per-file tabs any more: the window's only QTabWidget is the 3-tab one
     assert window.findChildren(QTabWidget) == [tabs]
     combo = window._pm_file_combo
     assert isinstance(combo, QComboBox) and combo.count() == count
     assert [os.path.normcase(f) for f in window._pm_files] == [
         os.path.normcase(os.path.abspath(s)) for s in sources]
-    # the arrows and the "1 / n" counter only show with something to switch to
+    # the file row (dropdown, arrows, "1 / n" counter) only shows with something to switch to
+    assert window._pm_nav.isVisibleTo(window) is (count > 1)
     assert window._pm_nav.prev_button.isVisibleTo(window) is (count > 1)
     assert window._pm_translation_stack.count() == count
 
@@ -298,3 +299,78 @@ def test_standalone_manager_opens_the_glossary_page_in_a_one_tab_window(tmp_path
     assert data["dialog"]._glossary_progress_dialog is page
     window.hide()
     assert not page._gp_auto_refresh_timer.isActive()
+
+
+def _panel_legend(window):
+    """(total, completed) read from the glossary panel's own legend labels."""
+    import re
+    from PySide6.QtWidgets import QLabel
+
+    texts = [label.text() for label in window._pm_glossary_page.findChildren(QLabel)]
+    total = next(int(m.group(1)) for t in texts if (m := re.match(r"Total: (\d+)", t)))
+    done = next(int(m.group(1)) for t in texts if (m := re.search(r"Completed: (\d+)", t)))
+    return total, done
+
+
+def _tab_label(window, name):
+    tabs = window._pm_tabs
+    return tabs.tabText(tabs.indexOf(window._pm_tab_pages[name]))
+
+
+def _label_counts(label):
+    done, total = label.rsplit("(", 1)[1].rstrip(")").split("/")
+    return int(done), int(total)
+
+
+def test_glossary_tab_count_is_completed_over_total_of_the_current_file(tmp_path, monkeypatch):
+    """The label counts like the Translation tab: the current file's legend "Completed" over
+    "Total", computed from the progress file before the (lazy) panel exists and then reported
+    by the panel itself, with the same numbers."""
+    rg = pl.current_rg()
+    built = []
+    original = rg.make_glossary_progress_model
+
+    def recording(owner, fp, gp_path, **kwargs):
+        built.append(os.path.basename(fp))
+        return original(owner, fp, gp_path, **kwargs)
+
+    monkeypatch.setattr(rg, "make_glossary_progress_model", recording)
+    _host, window, sources = _open(tmp_path, 2)
+    window._pm_update_tab_counts()
+    before = _tab_label(window, "glossary")
+    assert before.startswith("\U0001f4da Glossary (") and "/" in before
+    assert built == []  # still lazy: the pre-build number does not build a panel
+
+    window._pm_show_tab("glossary")
+    pl.pump(30, timeout=0.5)
+    total, done = _panel_legend(window)
+    assert _label_counts(before) == (done, total)
+    assert _label_counts(_tab_label(window, "glossary")) == (done, total)
+
+    # the panel reports every change of its legend
+    window._pm_set_glossary_count(sources[0], {"total": total + 5, "completed": done + 1})
+    assert _label_counts(_tab_label(window, "glossary")) == (done + 1, total + 5)
+
+
+def test_glossary_tab_count_follows_the_selected_file_and_drops_without_progress(tmp_path):
+    import json
+
+    _host, window, sources = _open(tmp_path, 2)
+    second = Path(sources[1]).stem
+    progress = next((Path(tmp_path) / "out" / "Glossary" / second).glob("*_glossary_progress.json"))
+    data = json.loads(progress.read_text(encoding="utf-8"))
+    data["completed"] = [0, 1, 6]
+    progress.write_text(json.dumps(data), encoding="utf-8")
+
+    window._pm_file_combo.setCurrentIndex(0)
+    pl.pump(30, timeout=0.3)
+    window._pm_update_tab_counts()
+    first_label = _tab_label(window, "glossary")
+    window._pm_file_combo.setCurrentIndex(1)
+    pl.pump(30, timeout=0.3)
+    second_label = _tab_label(window, "glossary")
+    assert _label_counts(first_label) != _label_counts(second_label)
+
+    progress.unlink()
+    window._pm_update_glossary_count()
+    assert _tab_label(window, "glossary") == "\U0001f4da Glossary"
