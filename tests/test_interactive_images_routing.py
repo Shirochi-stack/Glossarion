@@ -173,3 +173,58 @@ def test_image_requests_land_in_the_image_payload_folder(routed, tmp_path):
     assert Path(folder).parent.name == 'image_generation'
     text_folder = client._generate_unique_thread_dir(runner.PLAN_CONTEXT)
     assert Path(text_folder).parent.name == 'interactive_images_plan'
+
+
+def test_parallel_image_requests_rotate_across_the_image_pool_and_text_never_does(routed):
+    """Batch mode (3 workers, 6 chapters): every image request takes a pool key and the pool is spread over all of
+    them (not everything on one key); the planner requests keep the normal key; the requests do overlap."""
+    out, calls, _mp = routed
+    entries = json.loads((out / 'translation_progress.json').read_text(encoding='utf-8'))
+    for n in range(2, 7):
+        name = f'response_{n:03d}_ch{n}.html'
+        (out / name).write_text(CH1.replace('Ch 1', f'Ch {n}').replace('Chapter 1', f'Chapter {n}'), encoding='utf-8')
+        entries['chapters'][str(n)] = {'actual_num': n, 'output_file': name, 'status': 'completed'}
+    (out / 'translation_progress.json').write_text(json.dumps(entries), encoding='utf-8')
+    pool = [{'api_key': f'img-key-{c}', 'model': 'gemini-3-pro-image-preview', 'enabled': True} for c in 'abc']
+    import threading
+    import time
+    state = {'now': 0, 'peak': 0, 'n': 0}
+    lock = threading.Lock()
+    from unified_api_client import UnifiedClient
+    inner = UnifiedClient._send_internal
+
+    def slow(self, messages, *args, **kwargs):
+        with lock:
+            state['now'] += 1
+            state['peak'] = max(state['peak'], state['now'])
+        try:
+            time.sleep(0.1)
+            if getattr(self, '_force_image_output_mode', False):
+                # the isolated pool request runs on a copy of the client: like the real routes, the reply carries the
+                # saved image's [GENERATED_IMAGE:path] marker
+                with lock:
+                    state['n'] += 1
+                    n = state['n']
+                    calls.append({'api_key': self.api_key, 'model': self.model, 'context': None, 'image_client': True,
+                                  'text_only': False})
+                path = out / f'generated_{n}.png'
+                path.write_bytes(_png())
+                return f'[GENERATED_IMAGE:{path}]', 'stop'
+            return inner(self, messages, *args, **kwargs)
+        finally:
+            with lock:
+                state['now'] -= 1
+
+    _mp.setattr(UnifiedClient, "_send_internal", slow)
+    batch = runner.BatchSettings(enabled=True, size=3, send_interval='0', send_interval_max='', thread_delay='0')
+    result = runner.run_interactive_images(_config(use_inpainter_keys=True, inpainter_keys=pool), str(out),
+                                           log=lambda *_a: None, batch=batch)
+    assert result.completed == 6, result.errors
+    images = [c for c in calls if c['image_client']]
+    texts = [c for c in calls if not c['image_client']]
+    assert len(images) == 6 and len(texts) == 6
+    used = [c['api_key'] for c in images]
+    assert set(used) == {'img-key-a', 'img-key-b', 'img-key-c'}, used     # spread over the whole pool
+    assert max(used.count(key) for key in set(used)) <= 3                 # not piled on one key
+    assert {c['api_key'] for c in texts} == {MAIN_KEY}
+    assert state['peak'] > 1                                              # parallel through the real client

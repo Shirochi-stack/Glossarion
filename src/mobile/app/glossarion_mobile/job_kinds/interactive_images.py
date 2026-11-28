@@ -79,7 +79,7 @@ def run(ctx: Any) -> dict:
 
     result = runner.run_interactive_images(
         config, folder, keys, log=ctx.log, stop_event=_CtxStop(ctx), on_progress=on_progress,
-        recompile=runner.owner_recompiler(owner))
+        recompile=runner.owner_recompiler(owner), batch=runner.batch_settings_from_owner(owner))
     summary = {"processed": result.processed, "completed": result.completed, "failed": result.failed,
                "rejected": result.rejected, "skipped": result.skipped, "images": result.images,
                "stopped": result.stopped}

@@ -1688,17 +1688,18 @@ def start_run(owner, output_dir, keys=None):
     if current_run(owner):
         _log(owner, "⚠️ Interactive Images is already running")
         return False
-    from interactive_images_runner import owner_recompiler, run_interactive_images
+    from interactive_images_runner import batch_settings_from_owner, owner_recompiler, run_interactive_images
 
     bridge = run_bridge(owner)
     stop = threading.Event()
+    batch = batch_settings_from_owner(owner)   # the translation's batch fields, read here on the GUI thread
 
     def work():
         try:
             result = run_interactive_images(
                 _config(owner), output_dir, keys, log=lambda message: _log(owner, message), stop_event=stop,
                 on_progress=lambda key, status: bridge.progress.emit(output_dir, key, status),
-                recompile=owner_recompiler(owner))
+                recompile=owner_recompiler(owner), batch=batch)
         except Exception as exc:
             _log(owner, f"❌ Interactive Images failed: {exc}\n{traceback.format_exc()}")
             result = exc
