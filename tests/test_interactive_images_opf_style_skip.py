@@ -296,3 +296,26 @@ def test_the_runner_never_plans_a_chapter_the_glossary_skips(tmp_path):
     runner.run_interactive_images(config, str(book), ['response_002_chap2.html'], log=lines.append,
                                   client_factory=_factory(sent, PLAN))
     assert not [r for r in sent if r['kind'] == 'text']
+
+
+def test_stop_reaches_a_request_waiting_inside_the_client():
+    """Stop is bound as the client's request-local cancel check during a request (a 404 retry loop in the
+    client checks it), and the previous check comes back afterwards."""
+    import threading
+    stop = threading.Event()
+    tls = SimpleNamespace(local_cancel_check='before', local_cancel_reason=None)
+    seen = []
+
+    class Client:
+        def _get_thread_local_client(self):
+            return tls
+
+        def send(self, messages, **kwargs):
+            seen.append(tls.local_cancel_check())
+            stop.set()
+            seen.append(tls.local_cancel_check())
+            return 'reply'
+
+    assert runner._send(Client(), [], {}, runner.PLAN_CONTEXT, stop_event=stop) == 'reply'
+    assert seen == [False, True]
+    assert tls.local_cancel_check == 'before'
