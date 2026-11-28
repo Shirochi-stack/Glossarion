@@ -622,6 +622,7 @@ class ProviderCatalogSpec:
     response_keys: Tuple[str, ...] = ("data", "models")
     id_fields: Tuple[str, ...] = ("id", "model", "name", "slug")
     allowed_types: Tuple[str, ...] = ()
+    fallback_urls: Tuple[str, ...] = ()  # custom routes: other catalog URLs tried when models_url is a 404 / unreachable / not JSON
 
 
 @dataclass(frozen=True)
@@ -1314,7 +1315,7 @@ def _extract_catalog_entries(payload: object, spec: ProviderCatalogSpec) -> List
 
 def _normalize_catalog_model_id(spec: ProviderCatalogSpec, model_id: object) -> Optional[str]:
     value = str(model_id or "").strip()
-    if spec.name == "gemini" and value.startswith("models/"):
+    if (spec.name == "gemini" or spec.name.startswith("custom:")) and value.startswith("models/"):
         value = value[len("models/"):]
     if not value or len(value) > 300 or any(ch.isspace() for ch in value):
         return None
@@ -1323,6 +1324,45 @@ def _normalize_catalog_model_id(spec: ProviderCatalogSpec, model_id: object) -> 
     if spec.prefix and not value.casefold().startswith(spec.prefix.casefold()):
         value = f"{spec.prefix}{value}"
     return value
+
+
+def _get_custom_catalog_payload(
+    spec: ProviderCatalogSpec,
+    url: str,
+    api_key: str,
+    headers: Mapping[str, str],
+    timeout: float,
+) -> object:
+    """Poll a custom route's own catalog URL, then its fallback URLs, until one returns models.
+
+    Only a 404/405, an unreachable host or a non-JSON answer from the route's own URL moves on to the
+    fallbacks (the same candidate bases custom_endpoint_discovery tries); any other HTTP status
+    (a rejected key, a server error) is raised as it is. The first error is raised when none works.
+    """
+    urls = [url]
+    for fallback in spec.fallback_urls:
+        if api_key and spec.auth_style == "query":
+            fallback = _append_query_parameter(fallback, "key", api_key)
+        urls.append(fallback)
+    first_error: Optional[BaseException] = None
+    first_payload: object = None
+    for index, candidate in enumerate(urls):
+        try:
+            payload = _http_get_json(candidate, headers, timeout)
+        except urllib.error.HTTPError as error:
+            if index == 0 and error.code not in (404, 405):
+                raise
+            first_error = first_error or error
+            continue
+        except (OSError, ValueError) as error:  # unreachable host, timeout, not JSON
+            first_error = first_error or error
+            continue
+        if _extract_catalog_entries(payload, spec):
+            return payload
+        first_payload = payload if first_payload is None else first_payload
+    if first_error is not None:
+        raise first_error
+    return first_payload
 
 
 def _fetch_provider_catalog(
@@ -1364,7 +1404,10 @@ def _fetch_provider_catalog(
     elif spec.name in ("opencode", "opencode-zen"):
         headers["Authorization"] = "Bearer public"
 
-    payload = _http_get_json(url, headers, timeout)
+    if spec.fallback_urls:
+        payload = _get_custom_catalog_payload(spec, url, api_key, headers, timeout)
+    else:
+        payload = _http_get_json(url, headers, timeout)
     if spec.name == "ollamapull" and (
         not isinstance(payload, dict) or not isinstance(payload.get("models"), list)
     ):
@@ -1637,6 +1680,42 @@ def _provider_key(
     return ""
 
 
+def _custom_endpoint_type(endpoint_type: object) -> str:
+    """The route's endpoint path (legacy names such as ``openai_chat`` resolved) via run_env."""
+    try:
+        from run_env import RunEnvMixin
+        return RunEnvMixin._normalize_custom_prefix_endpoint_type(endpoint_type)
+    except Exception:
+        raw = str(endpoint_type or "").strip()
+        return raw if raw.startswith("/") else "/chat/completions"
+
+
+def _custom_models_url(base: str, endpoint_type: str) -> Optional[str]:
+    """The catalog URL of a custom route base for its endpoint type; None when it has no catalog.
+
+    OpenAI style (``/chat/completions``, ``/images/generations``): ``<base>/models``. Versioned
+    endpoint paths (``/v1/messages`` Anthropic style, ``/v1/ocr`` Mistral): ``<base>/v1/models``, the
+    version added only when the base does not end with one. ``/{model_id}`` (fal) has none.
+    """
+    if "{" in endpoint_type:
+        return None
+    base = base.rstrip("/")
+    if endpoint_type.startswith("/v1/") and not re.search(r"/v\d+$", base, re.IGNORECASE):
+        base += "/v1"
+    url = f"{base}/models"
+    if endpoint_type == "/v1/messages":
+        url += "?limit=1000"
+    return url
+
+
+def _custom_catalog_auth_style(routing: str, endpoint_type: str) -> str:
+    if endpoint_type == "/v1/messages":
+        return "anthropic"
+    if urllib.parse.urlsplit(routing).hostname == "generativelanguage.googleapis.com":
+        return "query"
+    return "bearer"
+
+
 def _custom_catalog_specs(custom_routes: object, active_model: str) -> List[ProviderCatalogSpec]:
     if not isinstance(custom_routes, list):
         return []
@@ -1647,19 +1726,34 @@ def _custom_catalog_specs(custom_routes: object, active_model: str) -> List[Prov
             continue
         prefix = str(entry.get("prefix", "") or "").strip().replace("\\", "/").lstrip("/")
         routing = str(entry.get("routing", entry.get("base_url", "")) or "").strip().rstrip("/")
-        endpoint_type = str(entry.get("endpoint_type", "/chat/completions") or "").strip()
+        endpoint_type = _custom_endpoint_type(entry.get("endpoint_type", "/chat/completions"))
         if prefix and not prefix.endswith("/"):
             prefix += "/"
         if (
             not prefix or not routing.startswith(("http://", "https://"))
-            or endpoint_type not in ("/chat/completions", "chat/completions", "openai_chat")
             or not model_value.startswith(prefix.casefold())
         ):
             continue
+        models_url = _custom_models_url(routing, endpoint_type)
+        if models_url is None:
+            continue
+        fallbacks: List[str] = []
+        if endpoint_type.startswith("/v1/") and f"{routing}/models" != models_url.split("?", 1)[0]:
+            fallbacks.append(f"{routing}/models")  # a versioned-type route whose server lists models unversioned
+        try:
+            from custom_endpoint_discovery import candidate_bases
+            for candidate in candidate_bases(routing, endpoint_type):
+                fallback = _custom_models_url(candidate, endpoint_type)
+                if fallback and fallback != models_url and fallback not in fallbacks:
+                    fallbacks.append(fallback)
+        except Exception:
+            fallbacks = []
         result.append(ProviderCatalogSpec(
             name=f"custom:{prefix.casefold()}",
             prefix=prefix,
-            models_url=f"{routing}/models",
+            models_url=models_url,
+            auth_style=_custom_catalog_auth_style(routing, endpoint_type),
+            fallback_urls=tuple(fallbacks),
         ))
     return result
 

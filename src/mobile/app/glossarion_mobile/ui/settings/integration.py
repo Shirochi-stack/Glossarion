@@ -45,18 +45,19 @@ IMPLEMENTED_ROUTES = frozenset(SCREEN_ROUTES + ("settings.logs", "settings.accou
 _RUNNING_JOB_STATES = ("running", "finishing", "stopping")
 
 
-def custom_route_listener(store: Any) -> Callable[[str, str, str], bool]:
+def custom_route_listener(store: Any) -> Callable[..., bool]:
     """``custom_endpoint_discovery`` listener: a custom prefix whose URL a 404 search corrected goes into
     the settings store too (its next save would otherwise write the old route back)."""
 
-    def listener(prefix: str, old_url: str, new_url: str) -> bool:
+    def listener(prefix: str, old_url: str, new_url: str, endpoint_type: Optional[str] = None,
+                 old_endpoint_type: Optional[str] = None) -> bool:
         import copy
 
-        from custom_endpoint_discovery import PREVIOUS_ROUTING_KEY, apply_route_to_config
+        from custom_endpoint_discovery import PREVIOUS_ENDPOINT_TYPE_KEY, PREVIOUS_ROUTING_KEY, apply_route_to_config
 
-        scratch = {key: copy.deepcopy(store.get(key)) for key in ("custom_prefix_routes", PREVIOUS_ROUTING_KEY)
+        scratch = {key: copy.deepcopy(store.get(key)) for key in ("custom_prefix_routes", PREVIOUS_ROUTING_KEY, PREVIOUS_ENDPOINT_TYPE_KEY)
                    if store.get(key) is not None}
-        if not apply_route_to_config(scratch, prefix, old_url, new_url):
+        if not apply_route_to_config(scratch, prefix, old_url, new_url, endpoint_type, old_endpoint_type):
             return False
         for key, value in scratch.items():
             store.set(key, value)

@@ -16,6 +16,13 @@ Rules
   short timeout. 404 or a connection error = wrong; 400/401/403/405/422 = the endpoint exists.
   The first hit is confirmed once WITH the key: ``GET <candidate>/models`` answering 200 JSON, else
   the 400/401/422 evidence of the probe. No real generation is ever sent.
+* Endpoint type: when no base answers the route's own endpoint type, the other text endpoint types
+  (``TEXT_ENDPOINT_TYPES``: ``/v1/messages`` Anthropic style, ``/chat/completions``,
+  ``/v1/chat/completions``) are probed the same way on the current base and then on the candidate
+  bases (each type has its own candidates, see ``candidate_bases``). A hit (2xx, or the 400/401/422/405
+  evidence rules above) switches the route's ``endpoint_type`` (and routing when it changed); the old
+  value is kept under ``custom_prefix_previous_endpoint_type``. Only custom prefix routes are searched;
+  image, OCR and ``/{model_id}`` routes keep their type (their payloads are not text requests).
 * On success the route is rewritten in ``os.environ`` (what the request code reads), in every
   registered listener (the desktop owner, the mobile settings store) and, when no listener took it,
   in config.json; the old URL is kept under ``custom_prefix_previous_routing``.
@@ -36,9 +43,17 @@ EXISTS_STATUSES = frozenset({400, 401, 403, 405, 422})
 CONFIRM_STATUSES = frozenset({400, 401, 422})
 #: config.json key that keeps the URL a route had before discovery changed it: ``{prefix: old_url}``.
 PREVIOUS_ROUTING_KEY = 'custom_prefix_previous_routing'
+#: Same for the endpoint type a route had before discovery switched it: ``{prefix: old_endpoint_type}``.
+PREVIOUS_ENDPOINT_TYPE_KEY = 'custom_prefix_previous_endpoint_type'
+#: Endpoint types a translation request can use, in the order they are tried as alternatives. The route
+#: table presets among them are ``/chat/completions`` and ``/v1/messages``; ``/v1/chat/completions`` is
+#: sent by the generic custom path sender. Image, OCR and ``/{model_id}`` presets are never switched to.
+TEXT_ENDPOINT_TYPES = ('/v1/messages', '/chat/completions', '/v1/chat/completions')
 
 PROBE_TIMEOUT = (4, 8)  # (connect, read) seconds for one probe or confirm request
 
+#: Route table presets that are not text requests: never searched for an alternative type.
+_NON_TEXT_ENDPOINTS = frozenset({'/images/generations', '/v1/ocr', '/{model_id}'})
 _VERSION_TAIL = re.compile(r'/v(\d+)$', re.IGNORECASE)
 _ENDPOINT_VERSION_HEAD = re.compile(r'^/v\d+/', re.IGNORECASE)
 #: Second-level labels that make ``example.co.uk`` the registrable domain, not ``co.uk``.
@@ -200,14 +215,20 @@ def _confirm_with_key(candidate, endpoint_type, api_key, get=None):
 
 
 class DiscoveryResult:
-    """What ``discover_endpoint`` found: ``found`` (new base or None), ``tried`` [(url, status)],
-    ``current_ok`` (the current URL itself answers, so it is not a wrong URL) and ``evidence``."""
+    """What ``discover_endpoint`` found: ``found`` (new base or None), ``found_endpoint`` (new endpoint
+    type or None when the type stays), ``tried`` [(url, status)], ``current_ok`` (the current URL itself
+    answers, so it is not a wrong URL) and ``evidence``."""
 
     def __init__(self):
         self.found = None
+        self.found_endpoint = None
         self.tried = []
         self.current_ok = False
         self.evidence = ''
+
+
+def _is_hit(status, endpoint_type, with_success=False):
+    return status in EXISTS_STATUSES or (with_success and status is not None and 200 <= status < 300)
 
 
 def discover_endpoint(base_url, endpoint_type='/chat/completions', api_key='', *, probe=None, get=None):
@@ -231,6 +252,25 @@ def discover_endpoint(base_url, endpoint_type='/chat/completions', api_key='', *
         elif status in CONFIRM_STATUSES:
             result.found, result.evidence = candidate, str(status)
         return result  # the first hit ends the search, confirmed or not
+    # No base answers this endpoint type: try the other text types (custom prefix routes only).
+    if endpoint in TEXT_ENDPOINT_TYPES or supports_discovery(endpoint) and endpoint not in _NON_TEXT_ENDPOINTS:
+        for alt in TEXT_ENDPOINT_TYPES:
+            if alt == endpoint:
+                continue
+            for base in [current] + candidate_bases(current, alt):
+                status = probe(f"{base}{alt}")
+                result.tried.append((f"{base}{alt}", status))
+                if not _is_hit(status, alt, with_success=True):
+                    continue
+                if _confirm_with_key(base, alt, api_key, get):
+                    result.evidence = 'models'
+                elif status in CONFIRM_STATUSES or 200 <= status < 300:
+                    result.evidence = str(status)
+                else:
+                    continue  # 403/405 without a /models answer is too weak to switch the type
+                result.found = base if base != current else None
+                result.found_endpoint = alt
+                return result
     return result
 
 
@@ -241,8 +281,12 @@ def _prefix_key(prefix):
     return key if key.endswith('/') or not key else key + '/'
 
 
-def apply_route_to_config(config, prefix, old_url, new_url):
-    """Set the route's routing to *new_url* in the config dict and keep *old_url*; True when changed."""
+def apply_route_to_config(config, prefix, old_url, new_url, endpoint_type=None, old_endpoint_type=None):
+    """Set the route's routing (and endpoint type when given) in the config dict and keep the old values.
+
+    True when a route was changed. ``custom_prefix_previous_routing`` keeps *old_url* when the URL
+    changed, ``custom_prefix_previous_endpoint_type`` keeps *old_endpoint_type* when the type changed.
+    """
     key = _prefix_key(prefix)
     routes = config.get('custom_prefix_routes')
     if not isinstance(routes, list):
@@ -254,18 +298,27 @@ def apply_route_to_config(config, prefix, old_url, new_url):
                 route['base_url'] = new_url
             else:
                 route['routing'] = new_url
+            if endpoint_type:
+                route['endpoint_type'] = endpoint_type
             changed = True
     if not changed:
         return False
-    previous = config.get(PREVIOUS_ROUTING_KEY)
-    if not isinstance(previous, dict):
-        previous = {}
-    previous[str(prefix)] = old_url
-    config[PREVIOUS_ROUTING_KEY] = previous
+    if str(new_url).rstrip('/') != str(old_url).rstrip('/'):
+        previous = config.get(PREVIOUS_ROUTING_KEY)
+        if not isinstance(previous, dict):
+            previous = {}
+        previous[str(prefix)] = old_url
+        config[PREVIOUS_ROUTING_KEY] = previous
+    if endpoint_type and old_endpoint_type and endpoint_type != old_endpoint_type:
+        previous = config.get(PREVIOUS_ENDPOINT_TYPE_KEY)
+        if not isinstance(previous, dict):
+            previous = {}
+        previous[str(prefix)] = old_endpoint_type
+        config[PREVIOUS_ENDPOINT_TYPE_KEY] = previous
     return True
 
 
-def update_env_routes(prefix, new_url):
+def update_env_routes(prefix, new_url, endpoint_type=None):
     """Rewrite the route in ``CUSTOM_OPENAI_PREFIX_ROUTES`` (the text the request code reads)."""
     raw = os.environ.get('CUSTOM_OPENAI_PREFIX_ROUTES', '') or ''
     try:
@@ -282,6 +335,8 @@ def update_env_routes(prefix, new_url):
         if isinstance(route, dict) and _prefix_key(route.get('prefix')) == key:
             route['routing'] = new_url
             route.pop('base_url', None)
+            if endpoint_type:
+                route['endpoint_type'] = endpoint_type
             changed = True
     if changed:
         os.environ['CUSTOM_OPENAI_PREFIX_ROUTES'] = json.dumps(parsed, ensure_ascii=False)
@@ -290,7 +345,8 @@ def update_env_routes(prefix, new_url):
 
 def register_route_listener(callback):
     """``callback(prefix, old_url, new_url)`` runs after a route changed; return True when it saved the
-    change to its settings store (the desktop owner, the mobile config store)."""
+    change to its settings store (the desktop owner, the mobile config store). When the endpoint type
+    changed too, it is called with ``endpoint_type=`` and ``old_endpoint_type=`` keywords as well."""
     with _lock:
         if callback not in _listeners:
             _listeners.append(callback)
@@ -302,14 +358,14 @@ def unregister_route_listener(callback):
             _listeners.remove(callback)
 
 
-def persist_route_to_config_file(prefix, old_url, new_url, path=None):
+def persist_route_to_config_file(prefix, old_url, new_url, path=None, endpoint_type=None, old_endpoint_type=None):
     """Write the route change into config.json, leaving every other key as it is on disk."""
     try:
         import config_store
         current = config_store.load_config_retrying(path, decrypt=False)
-        scratch = {k: copy.deepcopy(current.get(k)) for k in ('custom_prefix_routes', PREVIOUS_ROUTING_KEY)
-                   if k in current}
-        if not apply_route_to_config(scratch, prefix, old_url, new_url):
+        keys = ('custom_prefix_routes', PREVIOUS_ROUTING_KEY, PREVIOUS_ENDPOINT_TYPE_KEY)
+        scratch = {k: copy.deepcopy(current.get(k)) for k in keys if k in current}
+        if not apply_route_to_config(scratch, prefix, old_url, new_url, endpoint_type, old_endpoint_type):
             return False
         config_store.update_config_file(scratch, path)
         return True
@@ -317,20 +373,23 @@ def persist_route_to_config_file(prefix, old_url, new_url, path=None):
         return False
 
 
-def record_route_update(prefix, old_url, new_url):
-    """Make the new URL the route's routing everywhere; True when a settings store kept it."""
-    update_env_routes(prefix, new_url)
+def record_route_update(prefix, old_url, new_url, endpoint_type=None, old_endpoint_type=None):
+    """Make the new URL (and endpoint type) the route's values everywhere; True when a store kept it."""
+    update_env_routes(prefix, new_url, endpoint_type)
     with _lock:
         listeners = list(_listeners)
+    extra = {}
+    if endpoint_type:
+        extra = {'endpoint_type': endpoint_type, 'old_endpoint_type': old_endpoint_type}
     saved = False
     for callback in listeners:
         try:
-            if callback(prefix, old_url, new_url):
+            if callback(prefix, old_url, new_url, **extra):
                 saved = True
         except Exception:
             continue
     if not saved:
-        saved = persist_route_to_config_file(prefix, old_url, new_url)
+        saved = persist_route_to_config_file(prefix, old_url, new_url, None, endpoint_type, old_endpoint_type)
     return saved
 
 
@@ -343,33 +402,52 @@ def reset_session():
         _prefix_locks.clear()
 
 
-def handle_not_found(prefix, routing, endpoint_type='/chat/completions', api_key='', *, log=print,
-                     probe=None, get=None):
-    """React to a 404 on a custom prefix route; returns the new base URL to retry on, or None.
+def handle_not_found_route(prefix, routing, endpoint_type='/chat/completions', api_key='', *, log=print,
+                           probe=None, get=None):
+    """React to a 404 on a custom prefix route; returns ``(routing, endpoint_type)`` to retry on, or None.
 
     Searches once per prefix per process. A second call (another worker thread whose request failed
-    on the same old URL) gets the answer of the first without another search.
+    on the same old route) gets the answer of the first without another search.
     """
     key = _prefix_key(prefix)
     old = str(routing or '').strip().rstrip('/')
-    if not key or not old or not supports_discovery(endpoint_type):
+    old_type = str(endpoint_type or '/chat/completions').strip()
+    if not key or not old or not supports_discovery(old_type):
         return None
     with _lock:
         prefix_lock = _prefix_locks.setdefault(key, threading.Lock())
     with prefix_lock:
         if key in _session:
             known = _session[key]
-            return known if known and known.rstrip('/').lower() != old.lower() else None
+            if not known:
+                return None
+            same = known[0].rstrip('/').lower() == old.lower() and known[1] == old_type
+            return None if same else known
         _session[key] = None  # marked before the work: whatever happens, this prefix is searched once
-        result = discover_endpoint(old, endpoint_type, api_key, probe=probe, get=get)
+        result = discover_endpoint(old, old_type, api_key, probe=probe, get=get)
         if result.current_ok:
             log(f"🔧 {prefix}: 404 at {old}, but the endpoint answers; no other URL searched")
             return None
-        if not result.found:
+        if not result.found and not result.found_endpoint:
             tried = ', '.join(url for url, _status in result.tried) or 'nothing to try'
-            log(f"🔧 {prefix}: 404 at {old} - tried {tried}; no endpoint found, keeping the original")
+            log(f"🔧 {prefix}: 404 at {old}{old_type} - tried {tried}; no endpoint found, keeping the original")
             return None
-        _session[key] = result.found
-        record_route_update(prefix, old, result.found)
-        log(f"🔧 {prefix}: 404 at {old} — found {result.found}, endpoint updated (old URL kept)")
-        return result.found
+        new_base = result.found or old
+        new_type = result.found_endpoint or old_type
+        _session[key] = (new_base, new_type)
+        record_route_update(prefix, old, new_base, result.found_endpoint, old_type)
+        what = new_base if not result.found_endpoint else f"{new_base}{new_type}"
+        kept = 'old URL kept' if not result.found_endpoint else 'old endpoint type kept'
+        log(f"🔧 {prefix}: 404 at {old}{old_type} — found {what}, endpoint updated ({kept})")
+        return new_base, new_type
+
+
+def handle_not_found(prefix, routing, endpoint_type='/chat/completions', api_key='', *, log=print,
+                     probe=None, get=None):
+    """``handle_not_found_route`` reduced to the new base URL; None when only the endpoint type changed
+    or nothing was found."""
+    found = handle_not_found_route(prefix, routing, endpoint_type, api_key, log=log, probe=probe, get=get)
+    old = str(routing or '').strip().rstrip('/')
+    if found and found[0].rstrip('/').lower() != old.lower():
+        return found[0]
+    return None

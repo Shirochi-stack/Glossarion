@@ -3959,6 +3959,27 @@ class UnifiedClient:
             return None
         return str(body.get('message') or err)
 
+    def _custom_prefix_not_found_error(self, provider: str, http_status: Optional[int],
+                                       url: Optional[str] = None) -> Optional["UnifiedClientError"]:
+        """A custom prefix request answered 404: the URL is wrong, so the same request is not retried here.
+
+        The error leaves the SDK retry loop at once; ``_send_custom_openai_with_endpoint_discovery`` then
+        searches the real endpoint (custom_endpoint_discovery) and retries once on the base it finds.
+        """
+        if http_status != 404 or (provider != 'custom_openai' and not url):
+            return None
+        route = self._get_custom_prefix_route_for_model(getattr(self, 'model', ''))
+        if not route:
+            return None
+        if provider != 'custom_openai' and not str(url).startswith(str(route.get('routing', '') or '').rstrip('/') + '/'):
+            return None  # an HTTP helper of another provider: its 404 keeps today's handling
+        url = f"{str(route.get('routing', '') or '').rstrip('/')}{route.get('endpoint_type') or '/chat/completions'}"
+        return UnifiedClientError(
+            f"Custom prefix '{route.get('prefix', '')}' answered HTTP 404 (Not Found) at {url}. "
+            "Check the routing URL of this prefix.",
+            error_type="endpoint_not_found", http_status=404,
+        )
+
     @classmethod
     def _local_openai_base_url(cls, provider: str) -> str:
         """The base URL of a keyless local route (``local`` honours GLOSSARION_LOCAL_LLM_URL)."""
@@ -12368,9 +12389,10 @@ class UnifiedClient:
                 http_status = getattr(e, 'http_status', None)
                 retryable_errors = ["500", "502", "503", "504", "api_error", "internal server error", "bad gateway", "service unavailable", "gateway timeout"]
                 
-                if (getattr(e, "error_type", None) == "api_error" or
+                if (getattr(e, "error_type", None) != "endpoint_not_found" and (
+                    getattr(e, "error_type", None) == "api_error" or
                     http_status in [500, 502, 503, 504] or
-                    any(err in error_str for err in retryable_errors)):
+                    any(err in error_str for err in retryable_errors))):
                     if attempt < internal_retries - 1:
                         # In multi-key mode, try rotating keys before backing off
                         if self._multi_key_mode and attempt > 0:  # Only after first attempt
@@ -12448,7 +12470,8 @@ class UnifiedClient:
                 
                 # If we get here, this is the last attempt or a non-retryable error
                 # Save failed request and return fallback only if we've exhausted retries
-                if attempt >= internal_retries - 1:
+                if attempt >= internal_retries - 1 or getattr(e, "error_type", None) == "endpoint_not_found":
+                    # (a custom prefix 404 is final: the endpoint search already ran, same 404 is never retried)
                     print(
                         f"❌ Final attempt failed; global retries exhausted after "
                         f"{internal_retries} attempt(s). Returning finish_reason='error' "
@@ -18785,6 +18808,11 @@ class UnifiedClient:
             status = resp.status_code
             if status in expected_status:
                 return resp
+            if status == 404:
+                not_found_error = self._custom_prefix_not_found_error(provider, 404, url)
+                if not_found_error is not None:
+                    resp.close()
+                    raise not_found_error
             if (status in (401, 429)
                     and re.match(r'^authnan\d{0,4}/', self._get_active_request_model(), re.I)
                     and url.startswith('https://nano-gpt.com/')):
@@ -27755,6 +27783,9 @@ class UnifiedClient:
                         if local_error:
                             raise UnifiedClientError(local_error, error_type="local_request_error",
                                                      http_status=http_status)
+                        not_found_error = self._custom_prefix_not_found_error(provider, http_status)
+                        if not_found_error is not None:
+                            raise not_found_error
 
                         # If graceful stop is active, do not schedule any further API calls (including retries).
                         # Graceful stop is different from force-stop: it lets in-flight calls finish, but blocks new ones.
@@ -32746,8 +32777,8 @@ class UnifiedClient:
                 route = self._get_custom_prefix_route_for_model(getattr(self, 'model', ''))
                 if not route:
                     raise exc
-                from custom_endpoint_discovery import handle_not_found
-                new_base = handle_not_found(
+                from custom_endpoint_discovery import handle_not_found_route
+                new_base = handle_not_found_route(
                     route.get('prefix', ''), route.get('routing', ''),
                     route.get('endpoint_type', '/chat/completions'), getattr(self, 'api_key', '') or '',
                 )
