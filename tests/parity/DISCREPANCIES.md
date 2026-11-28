@@ -4529,3 +4529,31 @@ the self-test suite `background` (`ci/android_smoke.sh` presses HOME while it wa
   trees and messages are unchanged. The v2.1 `chapters` shape is still not read (U5 desktop bug 3).
 - **Mobile.** `ImageItemVM.status` comes from the row (`pending` rows use the palette's not_translated /
   in_progress / failed); a pending tile's thumbnail is its source image.
+
+## Progress Manager: one window with Translation / Glossary / Interactive Images tabs (2026-11-27, desktop only; mobile already is one Book page with tabs)
+
+- **Change.** Single-file and multi-file Progress Managers are one window (`RetranslationMixin._build_progress_manager_window`):
+  a compact header (stylesheet font sizes, so the GUI Font Scale applies) with one file dropdown
+  (`qt_widget_helpers.NavComboRow` + `style_combo`: Halgakos arrow, wheel off) shared by the tabs, then the tabs
+  Translation / Glossary / Interactive Images. The old "1 file: no tabs, up to 3: one tab per file, more: dropdown"
+  choice is gone (always the dropdown, also for one file). The separate Glossary Progress dialog is now the
+  Glossary tab (built on first open; each file's panel is built the first time it is selected there); the
+  Glossary Progress button switches to it. The Interactive Images tab is a placeholder until that feature lands.
+  The standalone `_force_retranslation_epub_or_text` (no parent dialog; the parity harness) shows the same Glossary
+  page in a one-tab window.
+- **Behaviour fix ("last tab wins").** In a multi-file window every book's glossary panel was built by the
+  last-built tab's closure, so footnotes, summaries and the refinement lookups used that book's output folder,
+  `prog` and locator. Each file now registers its own panel builder (`window._gp_panel_builders`), so every
+  panel uses its own (`tests/test_progress_manager_window.py::test_each_book_uses_its_own_output_folder`).
+- **Kept as before.** The Glossary page's rows, legend, context menus, footnote / summary / refinement actions,
+  the per-panel file watcher, the explicit Refresh (0.8 s animation), the 2 s fallback timer (now running only
+  while the window is visible and the Glossary tab is current; it used to stop in the dialog's hideEvent), the
+  Glossary Manager Minimal-pass hook (the window forwards `_gp_refresh_visible` to the Glossary tab when it is
+  current), and the input-change rebuild reopening on the Glossary tab. With several files only EPUBs have a
+  glossary panel (a text file shows "No glossary progress for text files"); one file shows its panel whatever its
+  type, as the old dialog did. The old dialog's Close button is gone (the window's own close hides it). The
+  refinement preview (WindowModal) now blocks the whole Progress Manager window instead of the Glossary Progress
+  dialog only.
+- **Parity.** `test_glossary_progress_dialog_matches_frozen_desktop` / `..._actions_match_frozen_desktop` compare
+  the frozen dialog with the Glossary page (`dialog._glossary_progress_dialog` is the page): rows, colours, labels
+  and progress writes are unchanged.
