@@ -61,7 +61,7 @@ The image model never sees your HTML, and the planner never rewrites your chapte
 
 ✅ **DO** translate the book first. Interactive Images works on finished translated chapters.
 
-✅ **DO** have a glossary for the book. Character names come from it, so the planner uses the same spelling every time.
+✅ **DO** have a glossary for the book. Character names come from it, so the planner uses the same spelling every time. Interactive Images uses **the same glossary translation uses**: the one you loaded with **Load Glossary** in the main window (or the one Glossarion auto-loaded for the book), otherwise the glossary the **Glossary Mode** (Balanced / Full / and so on) wrote. There is nothing to load or pick in Interactive Images itself.
 
 ✅ **DO** pick an image model that can take **reference images** (for example Nano Banana / Gemini image models or `authgpt/` models). The settings window warns you when the chosen image model takes none.
 
@@ -75,8 +75,8 @@ The image model never sees your HTML, and the planner never rewrites your chapte
 
 1. **Open ⚙️ Other Setting → 🖼 Interactive Images…**
 2. **Profile:** leave it on **Default** (1 image per chapter).
-3. **Models:** choose the **Text model** (leave empty to use your main translation model) and the **Image model**.
-4. **Reference images:** for the current book, click **Load names from glossary**, then add one or two pictures for each main character (section 6). Optional, but strongly recommended.
+3. **Models:** choose the **Text model** (leave empty to use your main translation model) and, if you want, an **Image model** (leave it empty to use the Image Gen/Edit pool model, else the text model, see section 5).
+4. **Reference images:** the book's characters are listed for you from the glossary translation uses; add one or two pictures for each main character (section 6). Optional, but strongly recommended.
 5. Click **💾 Save**.
 6. **Open the Progress Manager → 🖼 Interactive Images tab** and click **▶ Build pending**.
 
@@ -95,7 +95,7 @@ Watch the log. Each finished chapter shows ✅, and the book is recompiled at th
 | **Include gender with character names** | Sends a character's gender with their name when it is certain (section 7) | On |
 | **Image subjects** | **characters** (people), **backgrounds** (scenery only, no people) or **both** | characters |
 | **Text model** | Model for the planner (and for writing styles from a prompt). Empty = main translation model | empty |
-| **Image model** | Model that draws the pictures | empty |
+| **Image model** | Model that draws the pictures. Empty = the first Image Gen/Edit pool model (when the pool is on), else the **text model**, if it is not known to answer in text only. A model that cannot be told apart (a custom prefix) is tried with one real image request first; if no picture comes back the run stops with a message instead of planning every chapter. A text-only model (for example DeepSeek) is never used: set an image model, or set Images per chapter to 0 | empty |
 | **🔑 Image Keys** | Opens the Image Gen/Edit key pool (section 13) | — |
 | **Max reference images** | How many reference pictures go with each image request | 5 |
 | **Resolution** | Requested image size class | 1K |
@@ -113,7 +113,7 @@ Watch the log. Each finished chapter shows ✅, and the book is recompiled at th
 
 Reference images are pictures you give the image model so a character keeps the same face, hair and outfit in every chapter.
 
-- References are kept **per book**. Pick the book, then add pictures under each character name. **Load names from glossary** fills in the names for you.
+- References are kept **per book**. Pick the book, then add pictures under each character name. The characters of the glossary translation uses are **listed automatically** (the path is shown above the list, and the list follows the file when it changes). A name that has pictures stays listed, marked *not in glossary*, if it leaves the glossary. **+ Character** adds a name by hand.
 - You can also add **art-style references** (no character). They set the overall look.
 - Pictures you add are copied into the book's `Interactive_Images/references/` folder.
 - For each picture, the characters **in that scene** get the slots first, then style references fill what is left, up to **Max reference images**.
@@ -293,7 +293,7 @@ Two things to know:
 
 Mobile has the same feature, using the same engine as desktop:
 
-- **Tools → Interactive Images** — four tabs: **Profile** (profile, images per chapter, gender, image subjects, prompts, placeholder texts), **Models** (text/image model, Image Gen/Edit keys, max references, resolution, aspect ratio with Auto chips), **References** (per book, with *Load names from glossary*) and **Styles** (all styles with a live preview panel).
+- **Tools → Interactive Images** — four tabs: **Profile** (profile, images per chapter, gender, image subjects, prompts, placeholder texts), **Models** (text/image model, Image Gen/Edit keys, max references, resolution, aspect ratio with Auto chips), **References** (per book; the characters come from the glossary translation uses, whose path is shown) and **Styles** (all styles with a live preview panel).
 - **A book's Images tab** — the same list, statuses and actions as desktop, plus **🖼 Gallery** in the ⋯ menu.
 - **Settings → EPUB output → Interactive images** — the style toggle and a link to the Tools screen.
 
@@ -308,6 +308,7 @@ Mobile has the same feature, using the same engine as desktop:
 | **No image could be placed** | The planner pointed at a paragraph that does not exist. Rebuild the chapter |
 | A character looks like the wrong gender | Fill in the glossary's gender column, check the tracker for conflicts (section 7) and add reference images |
 | Pictures look different every chapter | Add reference images and an art-style reference |
+| **no image-capable model found** / the text model returned no image | No image model is set and the text model cannot draw. Set an **Image model** (or add an Image Gen/Edit pool key), or set **Images per chapter** to 0 |
 | The image model ignores the size or ratio | Some models choose their own size; try another model |
 | The **Interactive styles** row is missing in Other Settings | Restart Glossarion; if you run from source, run `pip install -r requirements.txt`, then check the log for `Interactive styles rows unavailable` |
 | The EPUB got much bigger | Each picture is 2–4 MB; use fewer images per chapter, or delete some in the Gallery |
