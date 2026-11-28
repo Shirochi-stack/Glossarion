@@ -374,3 +374,18 @@ def test_glossary_tab_count_follows_the_selected_file_and_drops_without_progress
     progress.unlink()
     window._pm_update_glossary_count()
     assert _tab_label(window, "glossary") == "\U0001f4da Glossary"
+
+def test_images_tab_count_is_built_over_listed_chapters_before_the_tab_is_built(tmp_path):
+    """Like the Translation tab, the Interactive Images label counts before the tab is opened: built over the
+    translated chapters (Not built ones included), the shared tab_count_text."""
+    import interactive_images_progress_core as ipc
+
+    _host, window, _sources = _open(tmp_path, 1)
+    window._pm_update_tab_counts()
+    label = _tab_label(window, "images")
+    assert label.startswith("\U0001f5bc Interactive Images (") and "/" in label
+    done, total = _label_counts(label)
+    folder = next(iter(window._pm_images_output_dirs.values()))
+    model = ipc.open_progress(folder)
+    assert (done, total) == (0, len(ipc.image_rows(model))) and total > 0
+    assert getattr(window, "_pm_images_page", None) is None

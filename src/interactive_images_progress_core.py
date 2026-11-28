@@ -209,6 +209,17 @@ def translation_completed(chapter):
     return str(chapter.status or '').startswith('completed')
 
 
+#: Completed translations with nothing to illustrate: an image-only copy and an empty chapter.
+UNLISTED_TRANSLATION_STATUSES = ('completed_image_only', 'completed_empty')
+
+
+def chapter_listed(chapter):
+    """Whether the Interactive Images list shows a chapter: its translation completed (the chapters the
+    runner can build) and is not an image-only or empty copy. A chapter listed without an images entry is
+    a "Not built" row; skipped, failed, QA-failed and in-progress translations are not listed."""
+    return translation_completed(chapter) and str(chapter.status or '') not in UNLISTED_TRANSLATION_STATUSES
+
+
 # ---------------------------------------------------------------------------------------------
 # Model, rows, stats
 # ---------------------------------------------------------------------------------------------
@@ -299,10 +310,13 @@ def row_display(chapter, status, images):
 
 
 def image_rows(model, chapters=None):
-    """One row per translated chapter, in chapter order."""
+    """One row per listed chapter (:func:`chapter_listed`), in chapter order; a chapter without an images entry
+    is a "Not built" row."""
     rows = []
     entries = model.data.get('chapters') or {}
-    for index, chapter in enumerate(chapters if chapters is not None else model.chapters):
+    if chapters is None:
+        chapters = [chapter for chapter in model.chapters if chapter_listed(chapter)]
+    for index, chapter in enumerate(chapters):
         entry = entries.get(chapter.key)
         status, stale = entry_status(model, chapter, entry)
         images = 0
@@ -340,9 +354,9 @@ def pending_keys(model):
 
 
 def tab_count_text(stats):
-    """The Progress Manager tab label count: ``built/total`` (and ``k stale``)."""
-    built = stats.get('built', 0) + stats.get('partial', 0)
-    text = f"{built}/{stats.get('total', 0)}"
+    """The Progress Manager tab label count: ``built/total`` over the listed chapters (and ``k stale``).
+    Built is the "Built" chip: completed and styles-only; stale, partial, failed and rejected are not."""
+    text = f"{stats.get('built', 0)}/{stats.get('total', 0)}"
     if stats.get('stale'):
         text += f", {stats['stale']} stale"
     return text
@@ -775,7 +789,7 @@ __all__ = [
     'DONE_STATUSES', 'ImagesModel', 'ImagesRow', 'RETRY_STATUSES', 'ROW_ACTIONS', 'action_label', 'action_reason',
     'action_targets', 'delete_confirmation', 'deletable_rows', 'retry_rows', 'STAT_CHIPS', 'STATUS_COLORS', 'STATUS_GROUPS', 'STATUS_ICONS', 'STATUS_LABELS',
     'STORED_STATUSES', 'TranslatedChapter', 'book_signature', 'delete_entries', 'empty_progress', 'entry_status',
-    'find_progress', 'image_rows', 'image_stats', 'mark_for_rerun', 'mutate', 'needs_build', 'now_iso',
+    'chapter_listed', 'find_progress', 'image_rows', 'image_stats', 'mark_for_rerun', 'mutate', 'needs_build', 'now_iso',
     'open_progress', 'open_targets', 'pending_keys', 'plan_text', 'progress_signature', 'read_progress_file',
     'reload_progress', 'set_book_info', 'set_entry', 'set_status', 'strip_chapter_file', 'tab_count_text',
     'translated_chapters', 'translation_completed', 'write_json_atomic', 'write_text_atomic',

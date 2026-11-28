@@ -992,3 +992,22 @@ def test_job_path_with_batch_on_honours_stop(tmp_path, monkeypatch):
     ctx, result, _events = _run_job(folder, dict(CONFIG), stop=True, owner_fields=_owner_fields(True, 3))
     assert result == {"ok": None, "outputs": []} and ctx.results["interactive_images"]["stopped"] is True
     assert state["sent"] == [] and not list((folder / "Interactive_Images").glob("Glossarion_*.png"))
+
+def test_tools_screen_prompt_editors_get_placeholder_links(tmp_path):
+    """The prompt editors' placeholders are link-styled like the other mobile prompt editors: the shared
+    describe_placeholder is what a hold shows (tooltip text only)."""
+    async def scenario():
+        screen, _ctx, store, _jobs = _screen(tmp_path)
+        try:
+            links = screen._links(core.PLANNER_PLACEHOLDERS, "planner")
+            assert links.names_now() == frozenset(core.PLANNER_PLACEHOLDERS)
+            store["interactive_images_subjects"] = "backgrounds"
+            value = links.value("image_subjects", "")
+            assert value["text"] == core.placeholder_default("image_subjects_backgrounds")
+            assert links.value("chapter_title", "")["per_request"]
+            tokens = screen._links(core.PLACEHOLDER_TEXT_TOKENS["reference_line"], None)
+            assert tokens.names_now() == frozenset({"n", "name"}) and tokens.value("n", "")["per_request"]
+        finally:
+            screen.dispose()
+
+    asyncio.run(scenario())

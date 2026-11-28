@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDial
 import interactive_css_presets as presets
 import interactive_images_core as core
 import interactive_images_progress_core as ipc
+from qt_widget_helpers import link_placeholders, link_placeholders_in_label
 
 # Qt WebEngine for the style preview (animations, hover, <details>); Lite builds have none.
 try:
@@ -547,6 +548,12 @@ class PlaceholderTextDialog(QDialog):
         self.editor = QPlainTextEdit()
         self.editor.setFont(QFont('Consolas', 9))
         layout.addWidget(self.editor, 1)
+        # the {tokens} of this text (and the placeholders its note names) look like links with a tooltip
+        self._token_links = link_placeholders(
+            self.editor, lambda: core.PLACEHOLDER_TEXT_TOKENS.get(self.name, ()),
+            lambda name: core.describe_placeholder(name, _config(self.owner)))
+        self._note_names = (set(core.PLANNER_PLACEHOLDERS) | set(core.IMAGE_PLACEHOLDERS)
+                            | set(core.PLACEHOLDER_TOKEN_DESCRIPTIONS) | {item['name'] for item in self.items})
         self.status = QLabel("")
         self.status.setStyleSheet("color: #9aa0a6; font-size: 9pt;")
         layout.addWidget(self.status)
@@ -592,7 +599,9 @@ class PlaceholderTextDialog(QDialog):
             self.editor.setPlainText(self.drafts.get(self.name, self.effective(self.name)))
         finally:
             self.editor.blockSignals(blocked)
-        self.note.setText(self.notes[self.name])
+        link_placeholders_in_label(
+            self.note, self._note_names, lambda name: core.describe_placeholder(name, _config(self.owner)),
+            text=self.notes[self.name])
         self._refresh_status()
 
     def _refresh_status(self):
@@ -791,6 +800,8 @@ class InteractiveImagesDialog(QDialog):
             editor = QPlainTextEdit()
             editor.setFont(QFont('Consolas', 9))
             _placeholder_menu(editor, names, owner)
+            # the placeholders look like links with a tooltip of what each says now (as across the app)
+            link_placeholders(editor, names, lambda name, f=field_name: self._placeholder_value(f, name))
             tabs.addTab(editor, label)
             self.editors[field_name] = editor
         self.editors['image_system'].setPlaceholderText("Optional system prompt for the image request")
@@ -896,6 +907,14 @@ class InteractiveImagesDialog(QDialog):
         self._show_selected()
         self._update_reference_warning()
         self._sync_ratios_button()
+
+    def _placeholder_value(self, field, name):
+        """What ``{name}`` of the ``field`` prompt says now: the settings as this dialog shows them, the book
+        picked in Reference images. Tooltip text only; never sent to a model."""
+        config = dict(_config(self.owner), interactive_images_per_chapter=self.per_chapter.currentText(),
+                      interactive_images_subjects=self.subjects.currentText(),
+                      interactive_images_include_gender=bool(self.gender_cb.isChecked()))
+        return core.describe_placeholder(name, config, self.references.output_dir, field)
 
     # ---- Auto aspect ratio / gallery --------------------------------------------------------------
     def _sync_ratios_button(self, *_args):
@@ -1233,7 +1252,7 @@ def add_interactive_styles_rows(owner, section_layout, parent=None):
     combo.setMinimumWidth(200)
     combo.setToolTip("The style the next Interactive Images run writes as the book's stylesheet")
     h.addWidget(combo)
-    styles_btn = _button("🎨 Styles & Preview…", 'info', "Preview, duplicate, edit or write styles")
+    styles_btn = _button("🎨 Styles && Preview…", 'info', "Preview, duplicate, edit or write styles")
     h.addWidget(styles_btn)
     clear_btn = QPushButton("Clear")
     clear_btn.setToolTip("Turn interactive styles off (the Attach CSS file is not touched)")

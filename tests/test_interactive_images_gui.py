@@ -459,3 +459,56 @@ def test_gallery_checkbox_click_ticks_without_selecting_and_a_card_click_selects
     QTest.mouseClick(dialog.list.viewport(), Qt.LeftButton, Qt.ControlModifier, dialog.list.visualItemRect(
         dialog.list.item(2)).center())
     assert len(dialog.selected_images()) == 2                            # ctrl-click adds
+
+def test_prompt_editors_show_placeholders_as_links_with_tooltips(tmp_path):
+    """Planner / Image / CSS editors (and the placeholder-text editor) mark their placeholders like links, with
+    a hover tooltip of what each says now; the highlighting is formatting only (the prompt text is unchanged)."""
+    import interactive_images_core as core
+    import interactive_images_gui as ixg
+    from qt_widget_helpers import PlaceholderHighlighter
+
+    _app()
+    (tmp_path / 'glossary.csv').write_text('type,raw_name,translated_name,gender\ncharacter,a,Mira,female\n',
+                                           encoding='utf-8')
+    owner = _owner({'interactive_images_subjects': 'backgrounds'})
+    dialog = ixg.InteractiveImagesDialog(owner, None, output_dir=str(tmp_path))
+    for field in ('planner', 'image', 'css'):
+        editor = dialog.editors[field]
+        links = editor._placeholder_links
+        assert isinstance(links.highlighter, PlaceholderHighlighter)
+        before = editor.toPlainText()
+        links.highlighter.rehighlight()
+        assert editor.toPlainText() == before
+    planner = dialog.editors['planner']
+    document = planner.document()
+    assert any(f.format.fontUnderline() for i in range(document.blockCount())
+               for f in document.findBlockByNumber(i).layout().formats())
+    # the tooltips are the values the placeholders have now (UI only)
+    assert dialog._placeholder_value('planner', 'image_subjects')['text'] == core.placeholder_default(
+        'image_subjects_backgrounds')
+    assert dialog._placeholder_value('planner', 'character_names')['text'] == 'Mira (female)'
+    assert dialog._placeholder_value('planner', 'images_per_chapter')['text'] == dialog.per_chapter.currentText()
+    assert dialog._placeholder_value('image', 'scene_prompt')['per_request']
+    assert dialog.editors['image_system']._placeholder_links.highlighter is not None
+    texts = ixg.PlaceholderTextDialog(owner, None)
+    assert texts.editor._placeholder_links is not None
+    texts.combo.setCurrentIndex(texts.combo.findData('reference_line'))
+    assert {'n', 'name'} <= set(texts._token_links._current_names())
+    assert 'placeholder:' in texts.note.text()  # the note's placeholders are links too
+    texts.deleteLater()
+    dialog.deleteLater()
+
+
+def test_styles_button_shows_its_ampersand(tmp_path):
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+    import interactive_images_gui as ixg
+
+    _app()
+    owner = _owner()
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    ixg.add_interactive_styles_rows(owner, layout, host)
+    buttons = [b for b in host.findChildren(QPushButton) if 'Preview' in b.text()]
+    assert buttons and buttons[0].text().endswith('Styles && Preview\u2026')
+    host.deleteLater()

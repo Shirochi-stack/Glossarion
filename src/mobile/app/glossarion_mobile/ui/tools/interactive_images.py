@@ -560,6 +560,16 @@ class InteractiveImagesScreen(Screen):
         self.render_placeholders()
         return None
 
+    def _links(self, names: Any, field: Optional[str]) -> Any:
+        """The placeholders of an editor like links (``services.prompt_placeholders``): the shared
+        ``describe_placeholder`` is what a hold shows (tooltip text only, never sent to a model)."""
+        from glossarion_mobile.services.prompt_placeholders import PlaceholderLinks
+
+        core = _core()
+        return PlaceholderLinks(
+            frozenset(str(n).strip("{}") for n in names),
+            lambda name, _text: core.describe_placeholder(name, self.ctx.config_snapshot(), None, field))
+
     def edit_placeholder(self, name: str) -> Any:
         from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet
 
@@ -572,7 +582,8 @@ class InteractiveImagesScreen(Screen):
         editor = PromptEditorSheet(
             settings, title="{" + name + "}", subtitle="Placeholder text · Interactive Images · shared with the desktop",
             value=core.placeholder_text(self.ctx.config_snapshot(), name), default=core.placeholder_default(name),
-            placeholders=names, on_save=lambda text, n=name: self.set_placeholder(n, text))
+            placeholders=names, on_save=lambda text, n=name: self.set_placeholder(n, text),
+            links=self._links(core.PLACEHOLDER_TEXT_TOKENS.get(name, ()), None))
         self.editor = editor
         editor.show()
         return editor
@@ -635,7 +646,8 @@ class InteractiveImagesScreen(Screen):
         editor = PromptEditorSheet(
             settings, title=name, subtitle=f"{row[1]} · Interactive Images profile · shared with the desktop",
             value=str(profiles.texts.get(field_name, "") or ""), default=builtin.get(field_name),
-            placeholders=names, on_save=lambda text, f=field_name: self._stage(f, text))
+            placeholders=names, on_save=lambda text, f=field_name: self._stage(f, text),
+            links=self._links(getattr(core, row[2], ()) if row[2] else (), field_name))
         self.editor = editor
         editor.show()
         return editor

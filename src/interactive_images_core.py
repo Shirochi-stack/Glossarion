@@ -1176,6 +1176,99 @@ def subjects_text(settings):
     return placeholder_text(settings, 'image_subjects_' + settings.subjects)
 
 
+#: The prompt editors of a profile: field -> the placeholders its request replaces.
+PROMPT_FIELD_PLACEHOLDERS = {
+    'planner': PLANNER_PLACEHOLDERS, 'image': IMAGE_PLACEHOLDERS, 'image_system': (), 'css': CSS_PLACEHOLDERS,
+}
+_CHARACTER_PREVIEW_LIMIT = 12
+
+
+def prompt_placeholder_values(field, config, output_dir=None):
+    """``{name: value}`` of the placeholders of one prompt editor (``planner`` / ``image`` / ``image_system`` /
+    ``css``), what each says now, for the placeholder tooltips (desktop hover, mobile value sheet). A value is a
+    str or a ``prompt_defaults.placeholder_value_parts`` dict. UI only: nothing here is ever sent to a model.
+
+    ``config``: the settings the editor shows now (a dict with the ``interactive_images_*`` keys);
+    ``output_dir``: the selected book, for its characters (glossary + gender rule); None = describe only."""
+    import interactive_css_presets as presets
+
+    settings = settings_from_config(config)
+    values = {}
+
+    def per_request(text):
+        return {'per_request': True, 'text': text}
+
+    if field == 'planner':
+        values['images_per_chapter'] = {
+            'text': str(settings.per_chapter), 'extra': "The Images per chapter setting (0 = styles only)."}
+        subject = subjects_text(settings)
+        values['image_subjects'] = {
+            'text': subject,
+            'extra': f"Image subjects: {settings.subjects}. Edit it under Placeholder texts; empty removes its line."}
+        if not settings.css_enabled:
+            values['css_classes'] = {'active': False, 'inactive': "Inactive right now: interactive styles are off, "
+                                                                  "so the list of style classes is empty."}
+        else:
+            name = presets.active_preset_name(config)
+            css = presets.preset_css(config, name) or presets.BUILTIN_PRESETS[presets.DEFAULT_PRESET]
+            values['css_classes'] = {
+                'text': '\n'.join(presets.assignable_classes(css)),
+                'extra': f"The classes of the active style ({name}) the planner may assign."}
+        values['chapter_title'] = per_request("the title of the chapter being planned.")
+        values['paragraphs'] = per_request("the chapter's numbered paragraphs (several requests for a long chapter).")
+        if not output_dir:
+            values['character_names'] = per_request(
+                "the book's glossary characters, each with a gender only when it is confident.")
+        else:
+            entries = load_glossary_entries(output_dir)
+            names = character_names(entries)
+            tracker = load_gender_tracker(output_dir) if settings.include_gender else {}
+            genders = character_genders(entries, tracker) if settings.include_gender else {}
+            lines = [format_character(name, genders.get(name), settings) for name in names]
+            more = len(lines) - _CHARACTER_PREVIEW_LIMIT
+            text = '\n'.join(lines[:_CHARACTER_PREVIEW_LIMIT]) + (f"\n... and {more} more" if more > 0 else '')
+            values['character_names'] = {
+                'text': text,
+                'extra': ("The selected book's glossary characters (a gender only when confident)."
+                          if lines else "The selected book's glossary has no characters.")}
+    elif field == 'image':
+        values['scene_prompt'] = per_request("the planned scene description of the image being drawn.")
+        values['characters'] = per_request(
+            "the characters of that scene (with a gender when confident); a scene without characters removes "
+            "its line.")
+        values['reference_list'] = per_request(
+            "one line per attached reference image: " + fill_placeholders(
+                settings.reference_line, {'n': 1, 'name': placeholder_text(settings, 'style_reference')}))
+    elif field == 'css':
+        values['user_request'] = per_request("what you type in New from prompt.")
+        values['css_classes'] = {'text': '\n'.join(presets.CLASS_VOCABULARY),
+                                 'extra': "The class vocabulary every interactive style uses."}
+    return values
+
+
+#: What the ``{tokens}`` of a placeholder text stand for (the tooltip of a token in the editors).
+PLACEHOLDER_TOKEN_DESCRIPTIONS = {
+    'name': "the character's name (in a reference line: the character's name, or the art-style text for a style image).",
+    'gender': "the gender word of the character: the male or female placeholder text.",
+    'n': "the number of the reference image in the request: 1, 2, ...",
+}
+
+
+def describe_placeholder(name, config, output_dir=None, field=None):
+    """What ``{name}`` says now, for any placeholder the step shows (a prompt placeholder of ``field`` or of any
+    prompt, a token of a placeholder text, or an editable placeholder text such as ``character_gender``): a str or
+    a ``placeholder_value_parts`` dict. UI only: never sent to a model."""
+    for candidate in ([field] if field else ['planner', 'image', 'css']):
+        values = prompt_placeholder_values(candidate, config, output_dir)
+        if name in values:
+            return values[name]
+    if name in PLACEHOLDER_TOKEN_DESCRIPTIONS:
+        return {'per_request': True, 'text': PLACEHOLDER_TOKEN_DESCRIPTIONS[name]}
+    if any(item['name'] == name for item in placeholder_text_defs()):
+        return {'text': placeholder_text(config, name), 'extra': "An editable placeholder text."}
+    return ''
+
+
 # ---------------------------------------------------------------------------------------------
 # Gender (glossary column + Relations & Gender Tracker), only when it is confident
 # ---------------------------------------------------------------------------------------------

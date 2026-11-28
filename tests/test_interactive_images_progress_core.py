@@ -121,10 +121,55 @@ def test_translated_chapters_and_rows_before_any_build(book):
         ('response_003_ch3.html', 3, 'in_progress')]
     model = ipc.open_progress(str(book))
     rows = ipc.image_rows(model)
-    assert [r.status for r in rows] == ['not_built'] * 3
-    assert ipc.image_stats(model, rows)['not_built'] == 3
-    assert ipc.pending_keys(model) == [c.key for c in chapters]
+    # the list: translated chapters whose translation completed; the in-progress one is not listed
+    assert [r.key for r in rows] == ['response_001_ch1.html', 'response_002_ch2.html']
+    assert [r.status for r in rows] == ['not_built'] * 2
+    stats = ipc.image_stats(model, rows)
+    assert stats['not_built'] == 2 and stats['total'] == 2
+    assert ipc.tab_count_text(stats) == '0/2'
+    assert ipc.pending_keys(model) == ['response_001_ch1.html', 'response_002_ch2.html']
     assert ipc.find_progress(str(book)) is None
+
+
+def test_list_is_every_completed_translation_with_not_built_rows_and_a_built_count(book):
+    """Every chapter whose translation completed is listed (a Not built row without an images entry); image-only,
+    empty, skipped, failed and in-progress translations are not. The tab count is built/total over that list:
+    stale, partial and failed chapters are not built."""
+    chapters = {
+        'a': ('response_001_ch1.html', 'completed'), 'b': ('response_002_ch2.html', 'completed'),
+        'c': ('response_003_ch3.html', 'in_progress'), 'e': ('response_005_img.html', 'completed_image_only'),
+        'f': ('response_006_empty.html', 'completed_empty'), 'g': ('response_007_skip.html', 'skipped'),
+        'h': ('response_008_bad.html', 'failed'), 'i': ('response_009_ch9.html', 'completed'),
+        'j': ('response_010_ch10.html', 'completed'),
+    }
+    for name, _status in chapters.values():
+        if not (book / name).exists():
+            (book / name).write_text(CH2, encoding='utf-8')
+    (book / 'translation_progress.json').write_text(json.dumps({'chapters': {
+        key: {'actual_num': index + 1, 'output_file': name, 'status': status}
+        for index, (key, (name, status)) in enumerate(chapters.items())}}), encoding='utf-8')
+    path = core.progress_path(str(book))
+    ipc.set_entry(path, 'response_001_ch1.html', {
+        'status': 'completed', 'source_hash': core.visible_text_hash(CH1), 'images': [], 'classes': [{'class': 'x'}]})
+    ipc.set_entry(path, 'response_002_ch2.html', {'status': 'failed', 'error': 'boom'})
+    ipc.set_entry(path, 'response_009_ch9.html', {'status': 'completed', 'source_hash': 'old text', 'images': []})
+    model = ipc.open_progress(str(book))
+    rows = {r.key: r for r in ipc.image_rows(model)}
+    assert list(rows) == ['response_001_ch1.html', 'response_002_ch2.html', 'response_009_ch9.html',
+                          'response_010_ch10.html']
+    assert rows['response_010_ch10.html'].status == 'not_built' and not rows['response_010_ch10.html'].stored_status
+    assert rows['response_009_ch9.html'].status == 'stale'
+    assert rows['response_002_ch2.html'].status == 'failed'
+    stats = ipc.image_stats(model)
+    # chapter 1 has classes recorded but its file carries no Glossarion markup: stale as well
+    assert (stats['total'], stats['stale'], stats['failed'], stats['not_built']) == (4, 2, 1, 1)
+    # stale and failed are not built
+    assert stats['built'] == 0
+    assert ipc.tab_count_text(stats) == "0/4, 2 stale"
+    # Not built rows can be built; there is nothing to delete or retry on them
+    row = rows['response_010_ch10.html']
+    assert ipc.action_reason('build', [row]) is None
+    assert ipc.action_reason('delete', [row]) is not None and ipc.action_reason('retry', [row]) is not None
 
 
 def test_mutate_is_locked_and_atomic_across_threads(tmp_path):
@@ -154,7 +199,7 @@ def test_run_builds_images_classes_and_records_entries(book):
     sent = []
     result = runner.run_interactive_images(dict(CONFIG), str(book), client_factory=_factory(
         {'Ch 1': PLAN1, 'Ch 2': PLAN2}, sent))
-    assert (result.completed, result.failed, result.rejected, result.skipped) == (2, 0, 0, 1)
+    assert (result.completed, result.failed, result.rejected, result.skipped) == (2, 0, 0, 0)
     html1 = (book / 'response_001_ch1.html').read_text(encoding='utf-8')
     assert core.check_text_unchanged(CH1, html1) == (True, '')
     assert ('<p>Mira walked to the lantern gate.</p><figure class="glx-figure" data-glx="img"><img class="glx-illustration" '
@@ -179,11 +224,11 @@ def test_run_builds_images_classes_and_records_entries(book):
     model = ipc.open_progress(str(book))
     rows = {r.key: r for r in ipc.image_rows(model)}
     assert rows['response_001_ch1.html'].status == 'completed' and rows['response_001_ch1.html'].images == 1
-    assert rows['response_003_ch3.html'].status == 'skipped'
+    assert 'response_003_ch3.html' not in rows  # its translation has not completed: not listed
     entry = model.data['chapters']['response_001_ch1.html']
     assert entry['images'][0]['refs'] == ['references/mira_1.png', 'references/style_1.png']
     assert entry['source_hash'] == core.visible_text_hash(CH1)
-    assert ipc.tab_count_text(ipc.image_stats(model)) == '2/3'
+    assert ipc.tab_count_text(ipc.image_stats(model)) == '2/2'
 
 
 def test_retranslated_chapter_shows_stale_and_a_rerun_replaces_images(book):
