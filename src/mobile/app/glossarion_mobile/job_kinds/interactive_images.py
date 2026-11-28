@@ -43,6 +43,7 @@ def run(ctx: Any) -> dict:
     from glossarion_mobile.services.jobs import JobError
 
     try:
+        import interactive_images_core as core
         import interactive_images_progress_core as ipc
         import interactive_images_runner as runner
     except ImportError as exc:
@@ -79,11 +80,14 @@ def run(ctx: Any) -> dict:
 
     result = runner.run_interactive_images(
         config, folder, keys, log=ctx.log, stop_event=_CtxStop(ctx), on_progress=on_progress,
-        recompile=runner.owner_recompiler(owner), batch=runner.batch_settings_from_owner(owner))
+        recompile=runner.owner_recompiler(owner), batch=runner.batch_settings_from_owner(owner),
+        glossary_path=core.find_book_glossary(folder, owner) or "")
     summary = {"processed": result.processed, "completed": result.completed, "failed": result.failed,
                "rejected": result.rejected, "skipped": result.skipped, "images": result.images,
                "stopped": result.stopped}
     ctx.set_result(interactive_images=summary)
+    if result.no_image_model:
+        return {"ok": False, "outputs": [], "error": result.no_image_model}
     if result.stopped or ctx.stop_requested():
         return {"ok": None, "outputs": []}
     if result.errors and not result.processed:

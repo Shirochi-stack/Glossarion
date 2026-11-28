@@ -121,10 +121,55 @@ def test_translated_chapters_and_rows_before_any_build(book):
         ('response_003_ch3.html', 3, 'in_progress')]
     model = ipc.open_progress(str(book))
     rows = ipc.image_rows(model)
-    assert [r.status for r in rows] == ['not_built'] * 3
-    assert ipc.image_stats(model, rows)['not_built'] == 3
-    assert ipc.pending_keys(model) == [c.key for c in chapters]
+    # the list: translated chapters whose translation completed; the in-progress one is not listed
+    assert [r.key for r in rows] == ['response_001_ch1.html', 'response_002_ch2.html']
+    assert [r.status for r in rows] == ['not_built'] * 2
+    stats = ipc.image_stats(model, rows)
+    assert stats['not_built'] == 2 and stats['total'] == 2
+    assert ipc.tab_count_text(stats) == '0/2'
+    assert ipc.pending_keys(model) == ['response_001_ch1.html', 'response_002_ch2.html']
     assert ipc.find_progress(str(book)) is None
+
+
+def test_list_is_every_completed_translation_with_not_built_rows_and_a_built_count(book):
+    """Every chapter whose translation completed is listed (a Not built row without an images entry); image-only,
+    empty, skipped, failed and in-progress translations are not. The tab count is built/total over that list:
+    stale, partial and failed chapters are not built."""
+    chapters = {
+        'a': ('response_001_ch1.html', 'completed'), 'b': ('response_002_ch2.html', 'completed'),
+        'c': ('response_003_ch3.html', 'in_progress'), 'e': ('response_005_img.html', 'completed_image_only'),
+        'f': ('response_006_empty.html', 'completed_empty'), 'g': ('response_007_skip.html', 'skipped'),
+        'h': ('response_008_bad.html', 'failed'), 'i': ('response_009_ch9.html', 'completed'),
+        'j': ('response_010_ch10.html', 'completed'),
+    }
+    for name, _status in chapters.values():
+        if not (book / name).exists():
+            (book / name).write_text(CH2, encoding='utf-8')
+    (book / 'translation_progress.json').write_text(json.dumps({'chapters': {
+        key: {'actual_num': index + 1, 'output_file': name, 'status': status}
+        for index, (key, (name, status)) in enumerate(chapters.items())}}), encoding='utf-8')
+    path = core.progress_path(str(book))
+    ipc.set_entry(path, 'response_001_ch1.html', {
+        'status': 'completed', 'source_hash': core.visible_text_hash(CH1), 'images': [], 'classes': [{'class': 'x'}]})
+    ipc.set_entry(path, 'response_002_ch2.html', {'status': 'failed', 'error': 'boom'})
+    ipc.set_entry(path, 'response_009_ch9.html', {'status': 'completed', 'source_hash': 'old text', 'images': []})
+    model = ipc.open_progress(str(book))
+    rows = {r.key: r for r in ipc.image_rows(model)}
+    assert list(rows) == ['response_001_ch1.html', 'response_002_ch2.html', 'response_009_ch9.html',
+                          'response_010_ch10.html']
+    assert rows['response_010_ch10.html'].status == 'not_built' and not rows['response_010_ch10.html'].stored_status
+    assert rows['response_009_ch9.html'].status == 'stale'
+    assert rows['response_002_ch2.html'].status == 'failed'
+    stats = ipc.image_stats(model)
+    # chapter 1 has classes recorded but its file carries no Glossarion markup: stale as well
+    assert (stats['total'], stats['stale'], stats['failed'], stats['not_built']) == (4, 2, 1, 1)
+    # stale and failed are not built
+    assert stats['built'] == 0
+    assert ipc.tab_count_text(stats) == "0/4, 2 stale"
+    # Not built rows can be built; there is nothing to delete or retry on them
+    row = rows['response_010_ch10.html']
+    assert ipc.action_reason('build', [row]) is None
+    assert ipc.action_reason('delete', [row]) is not None and ipc.action_reason('retry', [row]) is not None
 
 
 def test_mutate_is_locked_and_atomic_across_threads(tmp_path):
@@ -154,7 +199,7 @@ def test_run_builds_images_classes_and_records_entries(book):
     sent = []
     result = runner.run_interactive_images(dict(CONFIG), str(book), client_factory=_factory(
         {'Ch 1': PLAN1, 'Ch 2': PLAN2}, sent))
-    assert (result.completed, result.failed, result.rejected, result.skipped) == (2, 0, 0, 1)
+    assert (result.completed, result.failed, result.rejected, result.skipped) == (2, 0, 0, 0)
     html1 = (book / 'response_001_ch1.html').read_text(encoding='utf-8')
     assert core.check_text_unchanged(CH1, html1) == (True, '')
     assert ('<p>Mira walked to the lantern gate.</p><figure class="glx-figure" data-glx="img"><img class="glx-illustration" '
@@ -179,11 +224,11 @@ def test_run_builds_images_classes_and_records_entries(book):
     model = ipc.open_progress(str(book))
     rows = {r.key: r for r in ipc.image_rows(model)}
     assert rows['response_001_ch1.html'].status == 'completed' and rows['response_001_ch1.html'].images == 1
-    assert rows['response_003_ch3.html'].status == 'skipped'
+    assert 'response_003_ch3.html' not in rows  # its translation has not completed: not listed
     entry = model.data['chapters']['response_001_ch1.html']
     assert entry['images'][0]['refs'] == ['references/mira_1.png', 'references/style_1.png']
     assert entry['source_hash'] == core.visible_text_hash(CH1)
-    assert ipc.tab_count_text(ipc.image_stats(model)) == '2/3'
+    assert ipc.tab_count_text(ipc.image_stats(model)) == '2/2'
 
 
 def test_retranslated_chapter_shows_stale_and_a_rerun_replaces_images(book):
@@ -288,9 +333,67 @@ def test_delete_and_mark_actions(book):
 
 
 def test_missing_image_model_stops_before_any_request(book):
+    """No image model, no pool, and a text model known to answer in text only (DeepSeek): refused before any request."""
     sent = []
-    result = runner.run_interactive_images({'model': 'gpt-test'}, str(book), client_factory=_factory({}, sent))
+    result = runner.run_interactive_images({'model': 'deepseek-chat'}, str(book), client_factory=_factory({}, sent))
     assert result.errors == ['no image model'] and not sent
+    assert 'no image-capable model' in result.no_image_model and 'deepseek-chat' in result.no_image_model
+    assert 'images per chapter to 0' in result.no_image_model
+
+
+def test_image_model_falls_back_from_the_setting_to_the_pool_to_the_text_model():
+    def choose(config, text='authgpt/gpt-6.2-sol'):
+        return runner.resolve_image_model(config, core.settings_from_config(config), text)
+
+    base = {'model': 'authgpt/gpt-6.2-sol'}
+    pool = dict(base, use_inpainter_keys=True,
+                inpainter_keys=[{'model': 'gemini-3-pro-image-preview', 'enabled': True}])
+    own = dict(pool, interactive_images_image_model='dall-e-3')
+    assert (choose(own).model, choose(own).source) == ('dall-e-3', 'the Interactive Images image model')
+    assert (choose(pool).model, choose(pool).source) == ('gemini-3-pro-image-preview', 'the Image Gen / Edit pool')
+    fallback = choose(base)
+    assert (fallback.model, fallback.source, fallback.capability) == ('authgpt/gpt-6.2-sol', 'the text model', 'image')
+    assert not fallback.probe                        # a route that returns images: no probe
+    assert choose(base, 'gpt-image-1').capability == 'image'
+    assert choose(base, 'custom/odd-model').probe     # unknown: the first image request is the test
+    assert choose(base, 'deepseek-chat').model == '' and choose(base, 'claude-sonnet-4').capability == 'text_only'
+    assert core.image_capability('qwen-image') == 'image'
+
+
+def test_unknown_text_model_is_probed_once_and_stops_the_run_when_no_image_comes_back(book):
+    _refs(book)
+    sent = []
+    result = runner.run_interactive_images(
+        {'model': 'custom/odd-model'}, str(book), client_factory=_factory({'Ch 1': PLAN1, 'Ch 2': PLAN2}, sent,
+                                                                            fail_images=(1,)))
+    kinds = [kind for kind, _c, _m in sent]
+    assert kinds.count('image') == 1 and kinds.count('text') == 1     # one probe, no planner for chapter 2
+    assert result.stopped and result.errors == ['no image model']
+    assert 'returned no image' in result.no_image_model and 'images per chapter to 0' in result.no_image_model
+    assert all(c == runner.IMAGE_CONTEXT for kind, c, _m in sent if kind == 'image')
+    model = ipc.open_progress(str(book))
+    assert not any(r.status == 'completed' for r in ipc.image_rows(model))
+
+
+def test_unknown_text_model_that_returns_a_picture_keeps_drawing(book):
+    _refs(book)
+    sent, logs = [], []
+    result = runner.run_interactive_images(
+        {'model': 'custom/odd-model'}, str(book), log=logs.append,
+        client_factory=_factory({'Ch 1': PLAN1, 'Ch 2': PLAN2}, sent))
+    assert (result.completed, result.failed) == (2, 0) and not result.no_image_model
+    assert [kind for kind, _c, _m in sent].count('image') == 2
+    assert any('custom/odd-model (the text model)' in line for line in logs)
+
+
+def test_known_image_route_as_text_model_needs_no_probe(book):
+    _refs(book)
+    sent, logs = [], []
+    result = runner.run_interactive_images(
+        {'model': 'authgpt/gpt-6.2-sol'}, str(book), log=logs.append,
+        client_factory=_factory({'Ch 1': PLAN1, 'Ch 2': PLAN2}, sent))
+    assert result.completed == 2
+    assert not any('first image request is the test' in line for line in logs)
 
 
 def test_generated_stylesheet_is_scoped(book):
@@ -376,3 +479,58 @@ def test_the_clients_own_saved_copy_of_an_image_is_removed(book):
     assert result.completed == 1
     assert (book / core.INTERACTIVE_FOLDER / 'Glossarion_ch001_1.png').read_bytes() == _png((10, 10, 200))
     assert not list(book.glob('image_generation_response_*'))
+
+
+# ---- the glossary: the one translation uses -----------------------------------------------------------
+
+def _glossary_setup(tmp_path):
+    out_root = tmp_path / 'outroot'
+    output_dir = out_root / 'Lantern'
+    output_dir.mkdir(parents=True)
+    source = tmp_path / 'Lantern.epub'
+    source.write_bytes(b'x')
+    return out_root, output_dir, str(source)
+
+
+def _csv(path, *names):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('type,raw_name,translated_name,gender\n' + ''.join(f'character,r{n},{n},\n' for n in names),
+                    encoding='utf-8')
+    return str(path)
+
+
+def test_the_glossary_is_the_one_translation_resolves_for_each_mode(tmp_path, monkeypatch):
+    from run_env import GlossaryResolver
+
+    monkeypatch.delenv('OUTPUT_DIRECTORY', raising=False)
+    out_root, output_dir, source = _glossary_setup(tmp_path)
+    config = {'output_directory': str(out_root)}
+
+    def resolve(mode='Off', manual=None, mapping=None, **extra):
+        owner = GlossaryResolver(dict(config, auto_glossary_mode=mode, **extra), manual, mapping)
+        return owner._resolve_book_glossary(str(output_dir), source), core.find_book_glossary(str(output_dir), owner)
+
+    assert resolve() == (None, None)                                       # none
+    in_output = _csv(output_dir / 'glossary.csv', 'Mira')
+    assert resolve()[0] == in_output and resolve()[1] == in_output           # the output folder's glossary
+    auto = _csv(out_root / 'Glossary' / 'Lantern' / 'Lantern_glossary.csv', 'Mira', 'Tomas')
+    assert resolve('Balanced')[0] == auto and resolve('Full')[0] == auto     # the auto-glossary output is preferred
+    assert resolve('Off')[0] == auto            # an output override prefers the shared folder in any mode, as translation does
+    manual = _csv(tmp_path / 'mine' / 'my_glossary.csv', 'Zed')
+    assert resolve('Balanced', manual)[0] == manual                         # Load Glossary wins in any mode
+    assert resolve('Off', manual)[0] == manual
+    other = _csv(tmp_path / 'mine' / 'other.csv', 'Yan')
+    assert resolve('Off', None, {source: other})[0] == other                 # the per-book map (several books)
+    assert resolve('No Glossary', manual) == (None, None)                    # no glossary: none, whatever was loaded
+    # the characters the step uses come from that file
+    names = core.character_names(core.load_glossary_entries(str(output_dir), owner=GlossaryResolver(
+        dict(config, auto_glossary_mode='Balanced'))))
+    assert names == ['Mira', 'Tomas']
+
+
+def test_reference_rows_list_the_glossary_and_keep_names_with_images():
+    refs = {'characters': {'Mira': ['references/mira_1.png'], 'Gone': ['references/gone_1.png'], 'Extra': []}}
+    rows = {name: (paths, in_glossary) for name, paths, in_glossary in
+            core.reference_rows_with_glossary(refs, ['Mira', 'Tomas'])}
+    assert rows == {'Mira': (['references/mira_1.png'], True), 'Tomas': ([], True),
+                    'Gone': (['references/gone_1.png'], False), 'Extra': ([], False)}

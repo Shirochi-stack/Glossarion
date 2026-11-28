@@ -8235,6 +8235,29 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             done = stats.get('completed', 0) if isinstance(stats, dict) else 0
             _set_tab_count('glossary', f"{done}/{total}" if total else None)
 
+        def _update_images_count():
+            """Interactive Images tab label before the tab is built (the built tab reports its
+            own numbers): built/total over the listed chapters, the shared tab_count_text."""
+            if 'images' not in pages or built.get('images'):
+                return
+            key = _current_file()
+            folder = dialog._pm_images_output_dirs.get(_pm_file_key(key)) if key is not None else None
+            if not folder or not os.path.isdir(folder):
+                _set_tab_count('images')
+                return
+            try:
+                import interactive_images_progress_core as ipc
+                signature = ipc.book_signature(folder)
+                cached = dialog._pm_images_counts.get(folder)
+                if cached is None or cached[0] != signature:
+                    model = ipc.open_progress(folder)
+                    cached = (signature, ipc.tab_count_text(ipc.image_stats(model)))
+                    dialog._pm_images_counts[folder] = cached
+                _set_tab_count('images', cached[1])
+            except Exception as exc:
+                print(f"\u26a0\ufe0f Interactive Images tab count failed: {exc}")
+                _set_tab_count('images')
+
         def _set_glossary_count(key, stats):
             """A file's built glossary panel reports its legend numbers (on every change)."""
             dialog._pm_glossary_counts[_pm_file_key(key)] = dict(stats) if isinstance(stats, dict) else None
@@ -8245,6 +8268,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         def _update_tab_counts():
             _update_translation_count()
             _update_glossary_count()
+            _update_images_count()
         def _notify_tab(name, shown):
             callbacks = dialog._pm_tab_callbacks.get(name)
             if not callbacks:
@@ -8421,16 +8445,19 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         dialog._pm_update_glossary_count = _update_glossary_count
         dialog._pm_set_glossary_count = _set_glossary_count
         dialog._pm_update_tab_counts = _update_tab_counts
+        dialog._pm_update_images_count = _update_images_count
         dialog._pm_register_tab_factory = _register_tab_factory
         dialog._pm_register_glossary = _register_glossary
         if 'glossary' in pages:
             dialog._gp_refresh_visible = _window_gp_refresh_visible
         dialog._pm_images_output_dirs = {}
+        dialog._pm_images_counts = {}
 
         def _register_images(key, output_dir):
             # A file's page registers its output folder for the Interactive Images tab.
             if output_dir:
                 dialog._pm_images_output_dirs[_pm_file_key(key)] = output_dir
+                QTimer.singleShot(0, _update_images_count)
 
         def _build_images_page(window, host):
             try:

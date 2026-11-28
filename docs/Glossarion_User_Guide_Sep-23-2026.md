@@ -31,6 +31,7 @@ This guide explains **every button, box, and toggle** in Glossarion in plain Eng
 19. [When things go wrong (troubleshooting)](#19-when-things-go-wrong-troubleshooting)
 20. [One-page cheat sheet](#20-one-page-cheat-sheet)
 21. [Arena proxy setup, accounts, and streaming](#21-arena-proxy-setup-accounts-and-streaming)
+22. [Interactive Images (AI illustrations and interactive styles)](#22-interactive-images-ai-illustrations-and-interactive-styles) — full guide: [Interactive_Images_Guide.md](Interactive_Images_Guide.md)
 
 ---
 
@@ -778,6 +779,7 @@ After translating, this stitches your translated HTML chapters into a real `.epu
 1. **Open EPUB Converter** and select the folder of translated HTML files.
 2. **Options worth knowing:**
    - **Attach CSS** — keep the book's styling (fonts, margins). Usually leave on.
+   - **Interactive styles** — a separate, CSS-only stylesheet for the parts Interactive Images marks; it never conflicts with Attach CSS. See the [Interactive Images guide](Interactive_Images_Guide.md#15-how-it-works-with-attach-css).
    - **Force NCX only** — make an old-style, maximally-compatible table of contents. Turn on only if your e-reader chokes on modern EPUBs.
    - **EPUB structure (Auto / EPUB2 / EPUB3)** — leave on **Auto** unless you have a reason; it copies the source layout.
    - **Retain source extension** — keep `.xhtml` if the original used it (helps compatibility).
@@ -1200,6 +1202,18 @@ The general **Enable streaming responses** and **Allow streaming logs during bat
 - **Download/setup failed:** check the app log and internet access, then retry **Arena Login**. Successful cached installations are reused.
 
 For runtime details and standalone commands, see [Arena proxy documentation](autharena_proxy.md).
+
+---
+
+## 22. Interactive Images (AI illustrations and interactive styles)
+
+**New in 9.15.26, desktop and mobile.** After a book is translated, Interactive Images can add **AI illustrations** right after the paragraphs they show, plus **CSS-only interactive styles**: status-window tables, glowing system messages, animated level-up lines. It runs as its own step, so it never touches a translation, and it checks that every chapter's text stays exactly the same.
+
+- **Where:** ⚙️ Other Setting → EPUB section (**Interactive styles**, **🎨 Styles & Preview…**, **🖼 Interactive Images…**), and **Progress Manager → 🖼 Interactive Images** tab.
+- **Quick start:** open **🖼 Interactive Images…**, choose an image model, add reference pictures of the main characters, 💾 Save, then **▶ Build pending** in the Progress Manager tab.
+- **It does not conflict with Attach CSS:** it is a separate stylesheet that only styles its own `.glx-` parts.
+
+➡️ **Full step-by-step guide: [Interactive Images Guide](Interactive_Images_Guide.md)** — settings, reference images, gender, prompts and placeholders, the 22 styles and the preview panel, the Gallery, batch mode, Image Gen/Edit keys, file locations and troubleshooting.
 
 ---
 

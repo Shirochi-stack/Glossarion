@@ -95,7 +95,8 @@ class ImagesGallery:
         ipc, core = _ipc(), _core()
         model = ipc.open_progress(self.folder)
         images = ipc.gallery_images(model)
-        names = core.character_names(core.load_glossary_entries(self.folder))
+        names = core.character_names(core.load_glossary_entries(
+            self.folder, owner=core.glossary_resolver(self.ctx.config_snapshot())))
         thumbs = {}
         for image in images:
             data = self.thumbs.get((image.id, os.path.getmtime(image.path)))
