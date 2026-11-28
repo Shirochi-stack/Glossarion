@@ -63,15 +63,17 @@ STATUS_COLORS = {
 #: Legend groups (the clickable stats chips).
 STATUS_GROUPS = {
     'built': ('completed', 'css_only'),
+    'skipped': ('skipped',),
     'partial': ('partial',),
     'stale': ('stale',),
     'failed': ('failed',),
     'rejected': ('rejected',),
-    'not_built': ('not_built', 'pending', 'skipped', 'in_progress'),
+    'not_built': ('not_built', 'pending', 'in_progress'),
 }
 #: The stats chips, in order: (group, label, colour) (desktop tab and mobile Images tab).
 STAT_CHIPS = (
     ('built', "✅ Built", '#27ae60'),
+    ('skipped', "⏭️ Skipped", '#94a3b8'),
     ('partial', "⚠️ Partial", 'orange'),
     ('stale', "🕒 Stale", '#d69e2e'),
     ('failed', "❌ Failed", '#e74c3c'),
@@ -345,6 +347,22 @@ def chapter_listed(chapter):
             and not chapter.skip_reason)
 
 
+#: Row icon and label of each skip reason (the Glossary tab's icons for the same reasons).
+SKIP_ICONS = {'image-only': '📸', 'empty': '📄', 'title/header-only': '🏷️', 'special file': '⏭️'}
+SKIP_LABELS = {'image-only': 'Image Only (Skipped)', 'empty': 'Empty (Skipped)',
+               'title/header-only': 'Title/Header Only (Skipped)', 'special file': 'Special File (Skipped)'}
+
+
+def chapter_skip(chapter):
+    """Why a completed translation is a "Skipped" row ('' = not skipped): the glossary's skip reason, or an
+    image-only / empty translated copy."""
+    if not translation_completed(chapter):
+        return ''
+    if chapter.skip_reason:
+        return chapter.skip_reason
+    return {'completed_image_only': 'image-only', 'completed_empty': 'empty'}.get(str(chapter.status or ''), '')
+
+
 # ---------------------------------------------------------------------------------------------
 # Model, rows, stats
 # ---------------------------------------------------------------------------------------------
@@ -432,49 +450,54 @@ def entry_status(model, chapter, entry=None):
     return status, False
 
 
-def row_display(chapter, status, images):
+def row_display(chapter, status, images, skip=''):
     count = f"{images} image{'s' if images != 1 else ''}" if images else "no images"
-    label = STATUS_LABELS.get(status, status)
-    return f"{STATUS_ICONS.get(status, '⬜')} [{chapter.position:03d}] Ch.{chapter.number:>4} │ {chapter.key} │ {count} │ {label}"
+    label = SKIP_LABELS.get(skip, STATUS_LABELS['skipped']) if skip else STATUS_LABELS.get(status, status)
+    icon = SKIP_ICONS.get(skip, STATUS_ICONS['skipped']) if skip else STATUS_ICONS.get(status, '⬜')
+    return f"{icon} [{chapter.position:03d}] Ch.{chapter.number:>4} │ {chapter.key} │ {count} │ {label}"
 
 
 def image_rows(model, chapters=None):
-    """One row per listed chapter (:func:`chapter_listed`), in chapter order; a chapter without an images entry
-    is a "Not built" row."""
+    """One row per listed chapter (:func:`chapter_listed`) and per skipped one (:func:`chapter_skip`, a
+    "Skipped" row with its reason, like the Glossary tab), in book order; a listed chapter without an images
+    entry is a "Not built" row."""
     rows = []
     entries = model.data.get('chapters') or {}
     if chapters is None:
-        chapters = [chapter for chapter in model.chapters if chapter_listed(chapter)]
+        chapters = [chapter for chapter in model.chapters if chapter_listed(chapter) or chapter_skip(chapter)]
     for index, chapter in enumerate(chapters):
         entry = entries.get(chapter.key)
-        status, stale = entry_status(model, chapter, entry)
+        skip = chapter_skip(chapter)
+        status, stale = ('skipped', False) if skip else entry_status(model, chapter, entry)
         images = 0
-        error = ''
+        error = SKIP_LABELS.get(skip, '') if skip else ''
         if isinstance(entry, dict):
             images = sum(1 for image in entry.get('images') or () if image.get('status') == 'completed')
-            error = str(entry.get('error') or '')
-        rows.append(ImagesRow('chapter', chapter.key, row_display(chapter, status, images), status,
-                              STATUS_COLORS.get(status, 'white'), STATUS_ICONS.get(status, '⬜'), index,
-                              chapter.key, images, error, stale,
+            error = error or str(entry.get('error') or '')
+        rows.append(ImagesRow('chapter', chapter.key, row_display(chapter, status, images, skip), status,
+                              STATUS_COLORS.get(status, 'white'),
+                              SKIP_ICONS.get(skip, STATUS_ICONS['skipped']) if skip else STATUS_ICONS.get(status, '⬜'),
+                              index, chapter.key, images, error, stale,
                               str(entry.get('status') or '') if isinstance(entry, dict) else '', entry))
     return rows
 
 
 def image_stats(model, rows=None):
-    """``{group: count}`` for :data:`STATUS_GROUPS` plus ``total`` and ``images``."""
+    """``{group: count}`` for :data:`STATUS_GROUPS` plus ``total`` and ``images``. ``total`` counts the chapters
+    that can be built; skipped rows are only in ``skipped``."""
     rows = rows if rows is not None else image_rows(model)
     stats = {group: 0 for group in STATUS_GROUPS}
     for row in rows:
         for group, statuses in STATUS_GROUPS.items():
             if row.status in statuses:
                 stats[group] += 1
-    stats['total'] = len(rows)
+    stats['total'] = len(rows) - stats['skipped']
     stats['images'] = sum(row.images for row in rows)
     return stats
 
 
 def needs_build(row):
-    return row.status not in DONE_STATUSES
+    return row.status not in DONE_STATUSES and row.status != 'skipped'
 
 
 def pending_keys(model):
@@ -834,6 +857,8 @@ def action_targets(action, rows):
         return retry_rows(rows)
     if action == 'delete':
         return deletable_rows(rows)
+    if action in ('build', 'mark'):
+        return [row for row in rows or () if row is not None and row.status != 'skipped']
     return [row for row in rows or () if row is not None]
 
 
@@ -846,6 +871,8 @@ def action_reason(action, rows, *, running=False):
         return "No failed, partial or rejected chapter selected"
     if action == 'delete' and not targets:
         return "Nothing built for the selected chapters"
+    if action in ('build', 'mark') and not targets and any(row is not None for row in rows or ()):
+        return "Glossary extraction skips the selected chapters"
     if action == 'open_images' and not any(row.images for row in targets):
         return "No images yet"
     if action not in ('open_folder',) and not targets:
@@ -922,7 +949,7 @@ __all__ = [
     'open_progress', 'open_targets', 'pending_keys', 'plan_text', 'progress_signature', 'read_progress_file',
     'reload_progress', 'set_book_info', 'set_entry', 'set_status', 'strip_chapter_file', 'tab_count_text',
     'translated_chapters', 'translation_completed', 'write_json_atomic', 'write_text_atomic',
-    'book_spine', 'chapter_skip_reason', 'glossary_skip_rules',
+    'book_spine', 'chapter_skip_reason', 'glossary_skip_rules', 'chapter_skip', 'SKIP_ICONS', 'SKIP_LABELS',
     'GalleryDeleteResult', 'GalleryImage', 'delete_gallery_images', 'gallery_chapters', 'gallery_characters',
     'gallery_delete_confirmation', 'gallery_filter', 'gallery_images', 'gallery_thumbnail',
 ]

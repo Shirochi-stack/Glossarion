@@ -132,9 +132,9 @@ def test_translated_chapters_and_rows_before_any_build(book):
 
 
 def test_list_is_every_completed_translation_with_not_built_rows_and_a_built_count(book):
-    """Every chapter whose translation completed is listed (a Not built row without an images entry); image-only,
-    empty, skipped, failed and in-progress translations are not. The tab count is built/total over that list:
-    stale, partial and failed chapters are not built."""
+    """Every chapter whose translation completed is listed (a Not built row without an images entry); image-only
+    and empty copies are Skipped rows; skipped, failed and in-progress translations are not listed. The tab count
+    is built/total over the buildable rows: stale, partial and failed chapters are not built."""
     chapters = {
         'a': ('response_001_ch1.html', 'completed'), 'b': ('response_002_ch2.html', 'completed'),
         'c': ('response_003_ch3.html', 'in_progress'), 'e': ('response_005_img.html', 'completed_image_only'),
@@ -155,14 +155,15 @@ def test_list_is_every_completed_translation_with_not_built_rows_and_a_built_cou
     ipc.set_entry(path, 'response_009_ch9.html', {'status': 'completed', 'source_hash': 'old text', 'images': []})
     model = ipc.open_progress(str(book))
     rows = {r.key: r for r in ipc.image_rows(model)}
-    assert list(rows) == ['response_001_ch1.html', 'response_002_ch2.html', 'response_009_ch9.html',
-                          'response_010_ch10.html']
+    assert list(rows) == ['response_001_ch1.html', 'response_002_ch2.html', 'response_005_img.html',
+                          'response_006_empty.html', 'response_009_ch9.html', 'response_010_ch10.html']
+    assert rows['response_005_img.html'].status == 'skipped' and rows['response_006_empty.html'].status == 'skipped'
     assert rows['response_010_ch10.html'].status == 'not_built' and not rows['response_010_ch10.html'].stored_status
     assert rows['response_009_ch9.html'].status == 'stale'
     assert rows['response_002_ch2.html'].status == 'failed'
     stats = ipc.image_stats(model)
     # chapter 1 has classes recorded but its file carries no Glossarion markup: stale as well
-    assert (stats['total'], stats['stale'], stats['failed'], stats['not_built']) == (4, 2, 1, 1)
+    assert (stats['total'], stats['stale'], stats['failed'], stats['not_built'], stats['skipped']) == (4, 2, 1, 1, 2)
     # stale and failed are not built
     assert stats['built'] == 0
     assert ipc.tab_count_text(stats) == "0/4, 2 stale"

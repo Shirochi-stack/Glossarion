@@ -30510,8 +30510,14 @@ if __name__ == "__main__":
             dpi_setup.apply_font_scale(qapp)
         except Exception:
             pass
-        
-        # Initialize the app (modules already available)  
+        # Dropdowns open at once: Windows' roll-open effect draws a copy of the list for ~170 ms before the real one
+        # appears, which shows as a flicker on the larger popups (the Profile dropdown).
+        try:
+            qapp.setEffectEnabled(Qt.UI_AnimateCombo, False)
+        except Exception:
+            pass
+
+        # Initialize the app (modules already available)
         main_window = TranslatorGUI()
         try:
             # A 404 on a custom prefix finds the real endpoint (custom_endpoint_discovery) and tells the owner.

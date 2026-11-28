@@ -428,11 +428,29 @@ def _data_url(path):
     return 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii')
 
 
-def _send(client, messages, config, context, max_tokens=None):
+def _send(client, messages, config, context, max_tokens=None, stop_event=None):
+    """One request. ``stop_event`` is bound as the client's request-local cancel check (the hook translation and
+    glossary extraction use), so Stop also ends a request that is waiting or retrying inside the client."""
     temperature = float(config.get('temperature', 0.3) or 0.3)
     if max_tokens is None:
         max_tokens = int(config.get('max_output_tokens', config.get('max_tokens', 8192)) or 8192)
-    result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context=context)
+    tls, previous = None, None
+    if stop_event is not None and hasattr(client, '_get_thread_local_client'):
+        try:
+            tls = client._get_thread_local_client()
+            previous = (getattr(tls, 'local_cancel_check', None), getattr(tls, 'local_cancel_reason', None))
+            tls.local_cancel_check = stop_event.is_set
+            tls.local_cancel_reason = lambda: "Interactive Images stopped"
+        except Exception:
+            tls = None
+    try:
+        result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context=context)
+    finally:
+        if tls is not None:
+            try:
+                tls.local_cancel_check, tls.local_cancel_reason = previous
+            except Exception:
+                pass
     if isinstance(result, tuple):
         return result[0]
     return result
@@ -753,7 +771,7 @@ def _run_chapter(config, settings, output_dir, path, chapter, clients, dispatche
                                                       budget=budget, count_tokens=count_tokens):
         _check_stop(stop_event)
         with dispatcher.request(), clients.checkout('text') as text_client:
-            reply = _send(text_client, _messages('', prompt), config, PLAN_CONTEXT)
+            reply = _send(text_client, _messages('', prompt), config, PLAN_CONTEXT, stop_event=stop_event)
         plans.append(core.parse_plan(reply, len(blocks), css_classes, share, glossary_names=name_map))
     if settings.subjects == 'backgrounds':
         for plan in plans:   # Backgrounds only: a scene has no characters, whatever the model listed
@@ -826,7 +844,7 @@ def _run_chapter(config, settings, output_dir, path, chapter, clients, dispatche
                     # a client serves one request at a time: its aspect ratio and the reply bytes are its own
                     _set_image_aspect(image_client, ratio)
                     reply = _send(image_client, _messages(settings.image_system_prompt, content), config,
-                                  IMAGE_CONTEXT)
+                                  IMAGE_CONTEXT, stop_event=stop_event)
                     return _image_bytes_from_response(image_client, reply)
 
             data, ext = probe.run(request) if probe is not None else request()

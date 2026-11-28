@@ -225,7 +225,9 @@ SKIP_BOOK = [
 
 def _listed(book, config=None, owner=None):
     model = ipc.open_progress(str(book), ipc.glossary_skip_rules(config or {}, owner))
-    return [row.key for row in ipc.image_rows(model)], {c.key: c.skip_reason for c in model.chapters if c.skip_reason}
+    """The keys of the buildable rows (Skipped rows left out) and the chapters' skip reasons."""
+    return ([row.key for row in ipc.image_rows(model) if row.status != 'skipped'],
+            {c.key: c.skip_reason for c in model.chapters if c.skip_reason})
 
 
 def test_image_only_empty_and_special_chapters_are_skipped_like_the_glossary(tmp_path):
@@ -235,8 +237,22 @@ def test_image_only_empty_and_special_chapters_are_skipped_like_the_glossary(tmp
     assert reasons == {'response_titlepage.html': 'special file', 'response_002_chap2.html': 'image-only',
                        'response_003_chap3.html': 'title/header-only', 'response_004_chap4.html': 'empty',
                        'response_copyright.html': 'special file'}
-    stats = ipc.image_stats(ipc.open_progress(str(book)))
-    assert stats['total'] == 2 and stats['not_built'] == 2
+    model = ipc.open_progress(str(book))
+    rows = ipc.image_rows(model)
+    # skipped chapters are Skipped rows at their place in the book, with the Glossary tab's icon and reason
+    assert [row.key for row in rows] == [key for key, *_rest in SKIP_BOOK]
+    skipped = {row.key: row for row in rows if row.status == 'skipped'}
+    assert set(skipped) == set(reasons)
+    assert skipped['response_002_chap2.html'].icon == '📸'
+    assert 'Image Only (Skipped)' in skipped['response_002_chap2.html'].display
+    assert 'Special File (Skipped)' in skipped['response_titlepage.html'].display
+    stats = ipc.image_stats(model, rows)
+    assert stats['total'] == 2 and stats['not_built'] == 2 and stats['skipped'] == 5
+    assert ipc.tab_count_text(stats) == "0/2"
+    # Build pending and Build / Mark leave them alone
+    assert ipc.pending_keys(model) == listed
+    assert ipc.action_reason('build', list(skipped.values())) == "Glossary extraction skips the selected chapters"
+    assert ipc.action_targets('build', rows) == [row for row in rows if row.status != 'skipped']
 
 
 def test_title_header_only_is_skipped_only_while_the_glossary_setting_is_on(tmp_path):
@@ -280,3 +296,26 @@ def test_the_runner_never_plans_a_chapter_the_glossary_skips(tmp_path):
     runner.run_interactive_images(config, str(book), ['response_002_chap2.html'], log=lines.append,
                                   client_factory=_factory(sent, PLAN))
     assert not [r for r in sent if r['kind'] == 'text']
+
+
+def test_stop_reaches_a_request_waiting_inside_the_client():
+    """Stop is bound as the client's request-local cancel check during a request (a 404 retry loop in the
+    client checks it), and the previous check comes back afterwards."""
+    import threading
+    stop = threading.Event()
+    tls = SimpleNamespace(local_cancel_check='before', local_cancel_reason=None)
+    seen = []
+
+    class Client:
+        def _get_thread_local_client(self):
+            return tls
+
+        def send(self, messages, **kwargs):
+            seen.append(tls.local_cancel_check())
+            stop.set()
+            seen.append(tls.local_cancel_check())
+            return 'reply'
+
+    assert runner._send(Client(), [], {}, runner.PLAN_CONTEXT, stop_event=stop) == 'reply'
+    assert seen == [False, True]
+    assert tls.local_cancel_check == 'before'
