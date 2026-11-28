@@ -311,11 +311,13 @@ class InteractiveImagesScreen(Screen):
                                             on_click=lambda e: self.ctx.spawn(self.build_pending()))
         self.progress_button = ft.TextButton(content="Images tab", icon=ft.Icons.LIST_ALT, key="ix-tool-progress",
                                              on_click=lambda e: self.open_progress())
+        self.gallery_button = ft.TextButton(content="🖼 Gallery", key="ix-tool-gallery",
+                                            on_click=lambda e: self.open_gallery())
         book = ft.Container(content=ft.Column([
             ft.Row([ft.Icon(ft.Icons.MENU_BOOK, size=18), self.book_text,
                     ft.TextButton(content="Choose…", on_click=lambda e: self.open_picker(), key="ix-choose")],
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Row([self.build_button, self.progress_button], wrap=True, spacing=8),
+            ft.Row([self.build_button, self.progress_button, self.gallery_button], wrap=True, spacing=8),
         ], spacing=4, tight=True), padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW, key="ix-book-strip")
         bodies = {"profile": self._profile_tab(), "models": self._models_tab(),
@@ -367,7 +369,8 @@ class InteractiveImagesScreen(Screen):
         self.build_button.disabled = reason is not None
         self.build_button.tooltip = reason
         self.progress_button.disabled = not (target is not None and target.bid)
-        self.ctx.push(self.book_text, self.build_button, self.progress_button)
+        self.gallery_button.disabled = not self.folder
+        self.ctx.push(self.book_text, self.build_button, self.progress_button, self.gallery_button)
 
     def build_reason(self) -> Optional[str]:
         if not self.folder:
@@ -433,6 +436,20 @@ class InteractiveImagesScreen(Screen):
         if self.target is not None and self.target.bid:
             self.ctx.go("library.book", {"bid": self.target.bid}, {"tab": "images"})
 
+    def open_gallery(self) -> Any:
+        """🖼 Gallery: the book's images as cards with multi-select delete (``ui.library.images_gallery``)."""
+        from glossarion_mobile.ui.library.images_gallery import ImagesGallery
+
+        if not self._need_book():
+            return None
+        bid = getattr(self.target, "bid", "")
+        gallery = ImagesGallery(
+            self.ctx, self.folder,
+            open_chapter=(lambda image: self.ctx.go("library.book", {"bid": bid}, {"tab": "images"})) if bid else None)
+        self.gallery = gallery
+        gallery.show(self.ctx.page)
+        return gallery
+
     async def build_pending(self) -> Optional[str]:
         reason = self.build_reason()
         if reason is not None:
@@ -471,7 +488,28 @@ class InteractiveImagesScreen(Screen):
                               fields=core.InteractiveImagesProfiles.FIELDS, noun="interactive images",
                               on_change=lambda: self.render_prompts() if self.bar is not None else None)
         self.render_prompts()
+        values = core.settings_values(self.ctx.config_snapshot())
+        self.gender_switch = toggle(value=bool(values["interactive_images_include_gender"]),
+                                    key="ix-interactive_images_include_gender",
+                                    on_change=lambda e: self.set_value("interactive_images_include_gender",
+                                                                       bool(e.control.value)))
+        self.subjects = ft.Dropdown(label="Image subjects", dense=True, width=200, key="ix-interactive_images_subjects",
+                                    options=[ft.DropdownOption(key=s, text=core.SUBJECT_LABELS[s])
+                                             for s in core.SUBJECTS],
+                                    value=values["interactive_images_subjects"],
+                                    on_select=lambda e: self.set_value("interactive_images_subjects", e.control.value))
+        self.placeholder_rows = ft.Column(spacing=6, tight=True, key="ix-placeholder-rows")
+        self.render_placeholders()
         return self._page([
+            card("Characters & scenes", [
+                switch_row(self.gender_switch, "Include gender with character names"),
+                hint_text("A gender is sent only when it is confident: the glossary and the Relations & Gender "
+                          "Tracker agree, or one has it and the other has nothing against it. The wording is the "
+                          "{character_gender} placeholder text."),
+                ft.Row([self.subjects], wrap=True),
+                hint_text("Characters: scenes with the book's characters. Backgrounds: scenery and establishing "
+                          "moments without characters. Both: the planner may pick either ({image_subjects})."),
+            ], icon="FACE", key="ix-subjects-card"),
             card("Profile", [
                 self.bar.control,
                 ft.Row([self.per_chapter,
@@ -481,7 +519,63 @@ class InteractiveImagesScreen(Screen):
                           "The step runs after translation: a chapter whose text would change is rejected."),
             ], icon="TUNE", key="ix-profile-card"),
             card("Prompts", [self.prompt_cards], icon="EDIT_NOTE", key="ix-prompts-card"),
+            card("Placeholder texts", [
+                hint_text("Every word the step puts into a request comes from your prompts or from these texts; an "
+                          "empty text expands to nothing. Shared with the desktop (Edit placeholder text…)."),
+                self.placeholder_rows,
+            ], icon="TEXT_FIELDS", key="ix-placeholders-card"),
         ], "ix-profile")
+
+    def render_placeholders(self) -> None:
+        """One row per editable placeholder text: its current text, Edit and (when edited) Reset."""
+        core = _core()
+        config = self.ctx.config_snapshot()
+        rows = []
+        for item in core.placeholder_text_defs():
+            name = item["name"]
+            text = core.placeholder_text(config, name)
+            edited = text != item["default"]
+            rows.append(ft.Container(content=ft.Column([
+                ft.Text("{" + name + "}", weight=ft.FontWeight.W_600),
+                ft.Text(text if text else "(empty: expands to nothing)", theme_style=ft.TextThemeStyle.BODY_SMALL,
+                        color=ft.Colors.ON_SURFACE_VARIANT, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS,
+                        key=f"ix-ph-text-{name}"),
+                ft.Row([ft.TextButton(content="✏ Edit", key=f"ix-ph-edit-{name}",
+                                      on_click=lambda e, n=name: self.edit_placeholder(n)),
+                        ft.TextButton(content="↺ Reset", key=f"ix-ph-reset-{name}", visible=edited,
+                                      on_click=lambda e, n=name: self.set_placeholder(n, core.placeholder_default(n)))],
+                       spacing=0),
+            ], spacing=1, tight=True), padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                bgcolor=ft.Colors.SURFACE_CONTAINER, border_radius=tokens.RADII["card"], key=f"ix-ph-{name}"))
+        self.placeholder_rows.controls = rows
+        self.ctx.push(self.placeholder_rows)
+
+    def set_placeholder(self, name: str, text: str) -> Optional[str]:
+        """Store a placeholder text through the shared setter (the desktop's Placeholder Text window does the same)."""
+        core = _core()
+        config = self.ctx.config_snapshot()
+        core.set_placeholder_text(config, name, text)
+        key = core.REFERENCE_LINE_KEY if name == "reference_line" else core.PLACEHOLDER_TEXTS_KEY
+        self.ctx.set_cfg(key, config.get(key))
+        self.render_placeholders()
+        return None
+
+    def edit_placeholder(self, name: str) -> Any:
+        from glossarion_mobile.ui.screens.prompt_editor import PromptEditorSheet
+
+        settings = getattr(self.ctx, "settings", None)
+        if settings is None:
+            self.ctx.say("The prompt editor needs the Settings context")
+            return None
+        core = _core()
+        names = tuple("{" + n + "}" for n in core.PLACEHOLDER_TEXT_TOKENS.get(name, ()))
+        editor = PromptEditorSheet(
+            settings, title="{" + name + "}", subtitle="Placeholder text · Interactive Images · shared with the desktop",
+            value=core.placeholder_text(self.ctx.config_snapshot(), name), default=core.placeholder_default(name),
+            placeholders=names, on_save=lambda text, n=name: self.set_placeholder(n, text))
+        self.editor = editor
+        editor.show()
+        return editor
 
     @property
     def profiles(self) -> Any:
@@ -575,6 +669,11 @@ class InteractiveImagesScreen(Screen):
                                    values["interactive_images_resolution"])
         self.aspect = dropdown("interactive_images_aspect_ratio", "Aspect ratio", core.ASPECT_RATIOS,
                                values["interactive_images_aspect_ratio"])
+        # Auto: the ratios an image may get, ticked as chips (shown while the ratio is Auto)
+        self.ratio_row = ft.Row(wrap=True, spacing=6, run_spacing=4, key="ix-ratio-chips")
+        self.ratio_hint = hint_text("Auto: each image gets one of the ticked ratios, picked at random (the same "
+                                    "ratio for a chapter's image number on every rerun).", key="ix-ratio-hint")
+        self._render_ratios()
         switches = []
         for key, label in (("interactive_images_auto_after_translation", "Run after each translation"),
                            ("interactive_images_recompile_after",
@@ -596,7 +695,8 @@ class InteractiveImagesScreen(Screen):
                 ft.Row([ft.TextButton(content="🔑 Image keys", icon=ft.Icons.KEY, key="ix-image-keys",
                                       on_click=lambda e: self.ctx.go("settings.keys.pool", {"pool": "inpainter"}))]),
             ], icon="KEY", key="ix-keys-card"),
-            card("Images", [ft.Row([self.max_refs, self.resolution, self.aspect], wrap=True, spacing=8)],
+            card("Images", [ft.Row([self.max_refs, self.resolution, self.aspect], wrap=True, spacing=8),
+                            self.ratio_hint, self.ratio_row],
                  icon="IMAGE", key="ix-image-card"),
             card("Run", switches, icon="PLAY_CIRCLE", key="ix-run-card"),
         ], "ix-models")
@@ -606,7 +706,33 @@ class InteractiveImagesScreen(Screen):
         self.ctx.set_cfg(key, value)
         if key == "interactive_images_image_model":
             self._render_model_notes()
+        elif key in ("interactive_images_aspect_ratio", "interactive_images_aspect_choices"):
+            self._render_ratios()
         return value
+
+    def _render_ratios(self) -> None:
+        """The Auto ratio chips: ticked = a ratio an image may get; hidden unless the aspect ratio is Auto."""
+        core = _core()
+        config = self.ctx.config_snapshot()
+        values = core.settings_values(config)
+        ticked = values["interactive_images_aspect_choices"]
+        auto = values["interactive_images_aspect_ratio"] == "auto"
+        self.ratio_row.controls = [
+            ft.Chip(label=ft.Text(ratio), selected=ratio in ticked, key=f"ix-ratio-{ratio}",
+                    on_click=lambda e, r=ratio: self.toggle_ratio(r)) for ratio in core.ASPECT_CHOICES]
+        self.ratio_row.visible = auto
+        self.ratio_hint.visible = auto
+        self.ctx.push(self.ratio_row, self.ratio_hint)
+
+    def toggle_ratio(self, ratio: str) -> list:
+        """Tick / untick one ratio of the Auto pool (stored as ``interactive_images_aspect_choices``)."""
+        core = _core()
+        ticked = list(core.settings_values(self.ctx.config_snapshot())["interactive_images_aspect_choices"])
+        if ratio in ticked:
+            ticked.remove(ratio)
+        else:
+            ticked.append(ratio)
+        return self.set_value("interactive_images_aspect_choices", ticked)
 
     def _on_image_model(self, value: str) -> None:
         self.set_value("interactive_images_image_model", value)

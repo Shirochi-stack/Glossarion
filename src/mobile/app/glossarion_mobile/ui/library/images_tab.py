@@ -77,6 +77,7 @@ class ImagesTab:
                              key="ix-settings"),
             ft.PopupMenuItem(content="🎨 Styles & preview", on_click=lambda e: self.open_settings("styles"),
                              key="ix-styles"),
+            ft.PopupMenuItem(content="🖼 Gallery", on_click=lambda e: self.open_gallery(), key="ix-gallery"),
             ft.PopupMenuItem(content="📂 Files", on_click=lambda e: self.page.open_files(), key="ix-files"),
         ])
         self.sync_build_button()
@@ -442,6 +443,22 @@ class ImagesTab:
 
     def open_settings(self, tab: str = "models") -> None:
         self.ctx.go(SETTINGS_ROUTE, None, {"out": self.page.bid, "tab": tab})
+
+    def open_gallery(self) -> Any:
+        """⋯ › 🖼 Gallery: the book's images as cards (``images_gallery.ImagesGallery``); deleting reloads the rows."""
+        from glossarion_mobile.ui.library.images_gallery import ImagesGallery
+
+        folder = str(getattr(self.view, "output_dir", "") or "")
+        if not folder:
+            self.ctx.say("No images yet: this book has no output folder.")
+            return None
+        gallery = ImagesGallery(
+            self.ctx, folder,
+            open_chapter=lambda image: self.page.open_reader(chapter_filename=image.key, mode="translated"),
+            on_changed=lambda: self.ctx.spawn(self.page.reload_images(force=True)))
+        self.gallery = gallery
+        gallery.show(self.ctx.page)
+        return gallery
 
 
 class _PlanSheet:

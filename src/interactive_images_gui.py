@@ -14,15 +14,18 @@ imports ``epub_library`` (Lite builds exclude it and Qt WebEngine).
 
 import os
 import threading
+import time
 import traceback
 
-from PySide6.QtCore import QEvent, QObject, QFileSystemWatcher, QItemSelectionModel, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QGroupBox,
-                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
-                               QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget,
-                               QTextBrowser, QVBoxLayout, QWidget)
+from PySide6.QtCore import (QEvent, QFileSystemWatcher, QItemSelectionModel, QObject, QRect, QSize, Qt, QTimer,
+                            Signal)
+from PySide6.QtGui import QColor, QFont, QIcon, QImageReader, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGroupBox,
+                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListView, QListWidget,
+                               QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
+                               QSpinBox, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
+                               QStyleOptionViewItem, QTableWidget, QTableWidgetItem, QTabWidget, QTextBrowser,
+                               QVBoxLayout, QWidget)
 
 import interactive_css_presets as presets
 import interactive_images_core as core
@@ -178,20 +181,44 @@ def toggle_window(owner, attr, factory):
     return window
 
 
-def _placeholder_menu(editor, names):
-    """Right-click "Available placeholders" on a prompt editor (inserts the clicked one)."""
+PLACEHOLDER_TEXT_MENU_ACTION = "Edit placeholder text…"
+
+
+def _placeholder_menu(editor, names, owner=None):
+    """Right-click "Available placeholders" on a prompt editor (inserts the clicked one), plus -- with an
+    ``owner`` -- "Edit placeholder text…" (the Glossary Manager's wording): the editable texts the step expands
+    placeholders to (gender, image subjects, reference lines ...)."""
     def show_menu(pos):
         menu = editor.createStandardContextMenu()
         menu.setStyleSheet("QMenu { background-color: #2b2b2b; color: white; } "
                            "QMenu::item:selected { background-color: #17a2b8; }")
-        sub = menu.addMenu("Available placeholders")
-        for name in names:
-            action = sub.addAction("{" + name + "}")
-            action.triggered.connect(lambda _c=False, n=name: editor.insertPlainText("{" + n + "}"))
+        if names:
+            sub = menu.addMenu("Available placeholders")
+            for name in names:
+                action = sub.addAction("{" + name + "}")
+                action.triggered.connect(lambda _c=False, n=name: editor.insertPlainText("{" + n + "}"))
+        if owner is not None:
+            menu.addSeparator()
+            edit = menu.addAction(PLACEHOLDER_TEXT_MENU_ACTION)
+            edit.triggered.connect(lambda _c=False: open_placeholder_dialog(owner, editor.window()))
         menu.exec(editor.mapToGlobal(pos))
         menu.deleteLater()
     editor.setContextMenuPolicy(Qt.CustomContextMenu)
     editor.customContextMenuRequested.connect(show_menu)
+
+
+def open_path(path, make=False):
+    """Open a file or folder with the system's default application."""
+    if make:
+        os.makedirs(path, exist_ok=True)
+    if not os.path.exists(path):
+        return False
+    try:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+    except Exception:
+        return False
 
 
 def _model_names():
@@ -480,6 +507,191 @@ class InteractiveStylesDialog(QDialog):
 
 
 # =============================================================================================
+# Placeholder texts (right-click a prompt > "Edit placeholder text...") and the Auto ratio picker
+# =============================================================================================
+
+class PlaceholderTextDialog(QDialog):
+    """Pick a placeholder, edit the text it expands to, Save / Reset. The texts the step puts into a request
+    (gender wording, image subjects, reference lines) are all here, never in code; an empty text expands to
+    nothing."""
+
+    def __init__(self, owner, parent=None, *, select=None):
+        super().__init__(parent)
+        self.owner = owner
+        self.setWindowTitle("Placeholder Text")
+        self.setObjectName("interactive_placeholder_text_dialog")
+        self.setStyleSheet(DIALOG_STYLE)
+        self.resize(720, 480)
+        self.items = core.placeholder_text_defs()
+        self.defaults = {item['name']: item['default'] for item in self.items}
+        self.notes = {item['name']: item['note'] for item in self.items}
+        self.drafts = {}
+        self.name = None
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Placeholder:"))
+        self.combo = _house_combo(QComboBox())
+        self.combo.setMinimumWidth(280)
+        for item in self.items:
+            self.combo.addItem("{" + item['name'] + "}", item['name'])
+        row.addWidget(self.combo)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self.note = QLabel("")
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("color: #9aa0a6; font-size: 9pt;")
+        layout.addWidget(self.note)
+        self.editor = QPlainTextEdit()
+        self.editor.setFont(QFont('Consolas', 9))
+        layout.addWidget(self.editor, 1)
+        self.status = QLabel("")
+        self.status.setStyleSheet("color: #9aa0a6; font-size: 9pt;")
+        layout.addWidget(self.status)
+        buttons = QHBoxLayout()
+        self.save_btn = _button("💾 Save", 'primary', "Save this placeholder's text")
+        self.reset_btn = _button("Reset to Default", 'default')
+        self.reset_all_btn = _button("Reset All to Defaults", 'danger')
+        close_btn = _button("Close")
+        for button in (self.save_btn, self.reset_btn, self.reset_all_btn):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+        self.combo.currentIndexChanged.connect(self._on_select)
+        self.editor.textChanged.connect(self._refresh_status)
+        self.save_btn.clicked.connect(self.save)
+        self.reset_btn.clicked.connect(self.reset)
+        self.reset_all_btn.clicked.connect(self.reset_all)
+        close_btn.clicked.connect(self.close)
+        index = self.combo.findData(select) if select else 0
+        self.combo.setCurrentIndex(max(0, index))
+        self._on_select(self.combo.currentIndex())
+
+    def effective(self, name):
+        return core.placeholder_text(_config(self.owner), name)
+
+    def _remember(self):
+        if self.name is None:
+            return
+        text = self.editor.toPlainText()
+        if text != self.effective(self.name):
+            self.drafts[self.name] = text
+        else:
+            self.drafts.pop(self.name, None)
+
+    def _on_select(self, index):
+        if index < 0:
+            return
+        self._remember()
+        self.name = self.combo.itemData(index)
+        blocked = self.editor.blockSignals(True)
+        try:
+            self.editor.setPlainText(self.drafts.get(self.name, self.effective(self.name)))
+        finally:
+            self.editor.blockSignals(blocked)
+        self.note.setText(self.notes[self.name])
+        self._refresh_status()
+
+    def _refresh_status(self):
+        if self.name is None:
+            return
+        text = self.editor.toPlainText()
+        label = "Edited" if self.effective(self.name) != self.defaults[self.name] else "Default text"
+        if text != self.effective(self.name):
+            label += " (unsaved changes)"
+        self.status.setText(label)
+
+    def save(self):
+        if self.name is None:
+            return
+        core.set_placeholder_text(_config(self.owner), self.name, self.editor.toPlainText())
+        _persist(self.owner)
+        self.drafts.pop(self.name, None)
+        self._refresh_status()
+        try:
+            from qt_widget_helpers import flash_saved
+            flash_saved(self.save_btn)
+        except Exception:
+            pass
+
+    def reset(self):
+        if self.name is None:
+            return
+        self.editor.setPlainText(self.defaults[self.name])
+
+    def reset_all(self):
+        try:
+            from review_dialog import confirm_prompt_profile_action
+            if not confirm_prompt_profile_action(self, "Reset Placeholder Texts",
+                                                 "Reset every placeholder text to its default?"):
+                return
+        except Exception:
+            pass
+        config = _config(self.owner)
+        for name, default in self.defaults.items():
+            core.set_placeholder_text(config, name, default)
+        _persist(self.owner)
+        self.drafts.clear()
+        self._on_select(self.combo.currentIndex())
+
+
+def open_placeholder_dialog(owner, anchor=None, select=None):
+    """The placeholder text window (toggles: a second call closes it)."""
+    def make():
+        dialog = PlaceholderTextDialog(owner, None, select=select)
+        _stay_above(dialog, anchor)
+        return dialog
+    return toggle_window(owner, '_interactive_placeholder_dialog', make)
+
+
+class RatioPopup(QFrame):
+    """The Auto aspect ratio's checklist: the ratios an image may get, one picked at random for each image."""
+
+    changed = Signal(list)
+    #: A click on the button within this many seconds of the list closing is the click that closed it.
+    TOGGLE_SECONDS = 0.3
+
+    def __init__(self, owner, selected, parent=None):
+        super().__init__(parent, Qt.Popup)
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("QFrame { background-color: #252525; border: 1px solid #5a9fd4; } "
+                           "QLabel { color: #9ca3af; border: none; }")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+        hint = QLabel("Auto picks one of the ticked ratios for each image")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.boxes = {}
+        for ratio in core.ASPECT_CHOICES:
+            box = _create_styled_checkbox(owner, ratio)
+            box.setChecked(ratio in selected)
+            box.toggled.connect(lambda _c=False: self.changed.emit(self.selected()))
+            layout.addWidget(box)
+            self.boxes[ratio] = box
+        #: when the list last closed (time.monotonic)
+        self.closed_at = 0.0
+
+    def selected(self):
+        return [ratio for ratio in core.ASPECT_CHOICES if self.boxes[ratio].isChecked()]
+
+    def set_selected(self, selected):
+        for ratio, box in self.boxes.items():
+            blocked = box.blockSignals(True)
+            box.setChecked(ratio in selected)
+            box.blockSignals(blocked)
+
+    def hideEvent(self, event):
+        self.closed_at = time.monotonic()
+        super().hideEvent(event)
+
+    def popup_below(self, button):
+        self.adjustSize()
+        self.move(button.mapToGlobal(button.rect().bottomLeft()))
+        self.show()
+
+
+# =============================================================================================
 # Settings dialog
 # =============================================================================================
 
@@ -532,6 +744,40 @@ class InteractiveImagesDialog(QDialog):
         per_row.addStretch(1)
         layout.addLayout(per_row)
 
+        # The widgets are bound with ``config.get(key, default)`` (defaults = interactive_images_core.DEFAULTS)
+        # so the settings schema generator reads these keys, labels and defaults for the mobile settings.
+        subject_row = QHBoxLayout()
+        self.gender_cb = _create_styled_checkbox(owner, "Include gender with character names")
+        self.gender_cb.setChecked(bool(config.get('interactive_images_include_gender', True)))
+        self.gender_cb.setToolTip("Sends a gender with a character's name only when it is confident: the glossary "
+                                  "and the Relations & Gender Tracker agree, or one has it and the other has "
+                                  "nothing against it. A conflicting or unknown gender is never sent.\n"
+                                  "The wording is the {character_gender} placeholder text.")
+        subject_row.addWidget(self.gender_cb)
+        subject_row.addSpacing(12)
+        subject_row.addWidget(QLabel("Image subjects:"))
+        self.subjects_combo = QComboBox()
+        self.subjects = _house_combo(self.subjects_combo)
+        self.subjects_combo.addItems(list(core.SUBJECTS))
+        self.subjects_combo.setCurrentText(core.coerce_setting(
+            'interactive_images_subjects', config.get('interactive_images_subjects', 'characters')))
+        self.subjects.setFixedWidth(130)
+        self.subjects.setToolTip("characters: scenes with the book's characters (as before)\n"
+                                 "backgrounds: scenery and establishing moments, no characters\n"
+                                 "both: the planner may pick either\nThe planner is told through {image_subjects}.")
+        subject_row.addWidget(self.subjects)
+        subject_row.addSpacing(12)
+        self.placeholders_btn = _button("✏ Placeholder texts…", 'default',
+                                        "Edit the texts the placeholders expand to (gender, image subjects, "
+                                        "reference lines)")
+        self.placeholders_btn.clicked.connect(lambda: open_placeholder_dialog(self.owner, self))
+        subject_row.addWidget(self.placeholders_btn)
+        self.gallery_btn = _button("🖼 Gallery…", 'accent', "Browse and delete the book's generated images")
+        self.gallery_btn.clicked.connect(self._open_gallery)
+        subject_row.addWidget(self.gallery_btn)
+        subject_row.addStretch(1)
+        layout.addLayout(subject_row)
+
         tabs = QTabWidget()
         self.editors = {}
         for field_name, label, names in (
@@ -541,8 +787,7 @@ class InteractiveImagesDialog(QDialog):
                 ('css', "CSS", core.CSS_PLACEHOLDERS)):
             editor = QPlainTextEdit()
             editor.setFont(QFont('Consolas', 9))
-            if names:
-                _placeholder_menu(editor, names)
+            _placeholder_menu(editor, names, owner)
             tabs.addTab(editor, label)
             self.editors[field_name] = editor
         self.editors['image_system'].setPlaceholderText("Optional system prompt for the image request")
@@ -597,7 +842,17 @@ class InteractiveImagesDialog(QDialog):
         self.aspect_combo.setCurrentText(core.coerce_setting(
             'interactive_images_aspect_ratio', config.get('interactive_images_aspect_ratio', '3:4')))
         self.aspect.setFixedWidth(96)
+        self.aspect.setToolTip("auto: each image gets one of the ticked ratios, picked at random "
+                               "(the same for a chapter's image number on every rerun)")
         out_row.addWidget(self.aspect)
+        self.aspect_choices = core.coerce_setting('interactive_images_aspect_choices',
+                                                  config.get('interactive_images_aspect_choices',
+                                                             ['1:1', '3:4', '4:3', '16:9']))
+        self.ratios_btn = _button("Ratios…", 'default', "The ratios Auto picks from")
+        self.ratios_popup = None
+        self.ratios_btn.clicked.connect(self.toggle_ratios)
+        out_row.addWidget(self.ratios_btn)
+        self.aspect_combo.currentTextChanged.connect(self._sync_ratios_button)
         out_row.addWidget(QLabel("Max reference images sent:"))
         self.max_refs_spin = QSpinBox()   # native: no stylesheet rule reaches it
         self.max_refs = self.max_refs_spin
@@ -637,6 +892,40 @@ class InteractiveImagesDialog(QDialog):
 
         self._show_selected()
         self._update_reference_warning()
+        self._sync_ratios_button()
+
+    # ---- Auto aspect ratio / gallery --------------------------------------------------------------
+    def _sync_ratios_button(self, *_args):
+        self.ratios_btn.setVisible(self.aspect.currentText() == 'auto')
+        self.ratios_btn.setText(f"Ratios ({len(self.aspect_choices)})…")
+
+    def toggle_ratios(self):
+        """The Ratios button: opens the checklist, and closes it on the second click (the click outside the list
+        has just closed it: it must not reopen)."""
+        popup = self.ratios_popup
+        if popup is not None:
+            if popup.isVisible():
+                popup.hide()
+                return popup
+            if time.monotonic() - popup.closed_at < RatioPopup.TOGGLE_SECONDS:
+                return popup
+        if popup is None:
+            popup = self.ratios_popup = RatioPopup(self.owner, self.aspect_choices, self)
+            popup.changed.connect(self._on_ratios)
+        popup.set_selected(self.aspect_choices)
+        popup.popup_below(self.ratios_btn)
+        return popup
+
+    def _on_ratios(self, selected):
+        self.aspect_choices = list(selected)
+        self._sync_ratios_button()
+
+    def _open_gallery(self):
+        folder = self.references.output_dir
+        if not folder:
+            QMessageBox.information(self, "Gallery", "Pick a book (its output folder) in Reference images first.")
+            return None
+        return open_gallery_dialog(self.owner, self, folder)
 
     # ---- profiles -----------------------------------------------------------------------------
     def editor_texts(self):
@@ -707,6 +996,9 @@ class InteractiveImagesDialog(QDialog):
         config['interactive_images_max_references'] = int(self.max_refs.value())
         config['interactive_images_resolution'] = self.resolution.currentText()
         config['interactive_images_aspect_ratio'] = self.aspect.currentText()
+        config['interactive_images_aspect_choices'] = list(core.coerce_aspect_choices(self.aspect_choices))
+        config['interactive_images_include_gender'] = bool(self.gender_cb.isChecked())
+        config['interactive_images_subjects'] = self.subjects.currentText()
         config['interactive_images_auto_after_translation'] = bool(self.auto_cb.isChecked())
         config['interactive_images_recompile_after'] = bool(self.recompile_cb.isChecked())
 
@@ -990,6 +1282,381 @@ def add_interactive_styles_rows(owner, section_layout, parent=None):
 
 
 # =============================================================================================
+# Gallery: the book's AI images, with multi-select delete (the model is interactive_images_progress_core's)
+# =============================================================================================
+
+THUMB_SIZE = 168
+ALL_CHARACTERS = "All characters"
+ALL_CHAPTERS = "All chapters"
+
+
+def _thumbnail(path, size=THUMB_SIZE):
+    """A ``size`` x ``size`` icon of an image file (read scaled; an unreadable file gives an empty icon)."""
+    from PySide6.QtGui import QPainter
+
+    screen = QApplication.primaryScreen()
+    side = int(size * (screen.devicePixelRatio() if screen else 1.0))
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)
+    original = reader.size()
+    if original.isValid() and original.width() and original.height():
+        scale = min(side / original.width(), side / original.height(), 1.0)
+        reader.setScaledSize(QSize(max(1, int(original.width() * scale)), max(1, int(original.height() * scale))))
+    image = reader.read()
+    if image.isNull():
+        return QIcon()
+    # a square card with the picture centred (portrait and landscape images line up in the grid)
+    card = QPixmap(side, side)
+    card.fill(QColor('#2a2d33'))
+    picture = QPixmap.fromImage(image).scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    painter = QPainter(card)
+    painter.drawPixmap((side - picture.width()) // 2, (side - picture.height()) // 2, picture)
+    painter.end()
+    return QIcon(card)
+
+
+class _CardDelegate(QStyledItemDelegate):
+    """The gallery cards: the default item look with Other Settings' checkbox (a 16 px rounded square, #5a9fd4
+    border and fill when ticked, a white tick) drawn at the top-left corner of the card. Qt's own indicator is
+    left out (it shows a lone tick with no box on this theme); a click on the box ticks it without selecting the
+    card, a click anywhere else selects as usual."""
+
+    BOX = 18
+
+    def box_rect(self, option):
+        return QRect(option.rect.left() + 6, option.rect.top() + 6, self.BOX, self.BOX)
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.features &= ~QStyleOptionViewItem.HasCheckIndicator
+        widget = option.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+        if not (index.flags() & Qt.ItemIsUserCheckable):
+            return
+        checked = index.data(Qt.CheckStateRole) in (Qt.Checked, 2, Qt.Checked.value)
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            box = self.box_rect(option)
+            painter.setPen(QPen(QColor('#5a9fd4'), 1.5))
+            painter.setBrush(QColor('#5a9fd4') if checked else QColor(45, 45, 45, 220))
+            painter.drawRoundedRect(box, 3, 3)
+            if checked:
+                painter.setPen(QPen(QColor('white'), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                x, y, s = box.left(), box.top(), box.width()
+                painter.drawLine(x + s * 0.24, y + s * 0.52, x + s * 0.43, y + s * 0.72)
+                painter.drawLine(x + s * 0.43, y + s * 0.72, x + s * 0.77, y + s * 0.30)
+        finally:
+            painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        inside = False
+        if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick):
+            inside = self.box_rect(option).contains(event.position().toPoint())
+        if inside and index.flags() & Qt.ItemIsUserCheckable:
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                checked = index.data(Qt.CheckStateRole) in (Qt.Checked, 2, Qt.Checked.value)
+                model.setData(index, Qt.Unchecked if checked else Qt.Checked, Qt.CheckStateRole)
+            return True
+        return False
+
+
+class ImageViewerDialog(QDialog):
+    """One image at full size, with its details; Delete and Go to chapter."""
+
+    deleted = Signal(str)   # the image id
+
+    def __init__(self, gallery, image, parent=None):
+        super().__init__(parent)
+        self.gallery = gallery
+        self.image = image
+        self.setWindowTitle(f"{image.file} - {image.caption}")
+        self.setStyleSheet(DIALOG_STYLE)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(int(screen.width() * 0.55), int(screen.height() * 0.8))
+        layout = QVBoxLayout(self)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(False)
+        self.scroll.setAlignment(Qt.AlignCenter)
+        self.picture = QLabel()
+        self.picture.setPixmap(QPixmap(image.path))
+        self.scroll.setWidget(self.picture)
+        layout.addWidget(self.scroll, 1)
+        detail = [image.caption]
+        if image.aspect_ratio:
+            detail.append(f"Ratio {image.aspect_ratio}")
+        if image.prompt:
+            detail.append(image.prompt)
+        info = QLabel(" | ".join(detail))
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #a0aec0;")
+        layout.addWidget(info)
+        buttons = QHBoxLayout()
+        self.chapter_btn = _button("📄 Go to chapter", 'info', "Open the chapter file")
+        self.delete_btn = _button("🗑 Delete", 'danger', "Delete this image and its figure in the chapter")
+        close_btn = _button("Close")
+        self.chapter_btn.clicked.connect(lambda: gallery.go_to_chapter(image))
+        self.delete_btn.clicked.connect(self._delete)
+        close_btn.clicked.connect(self.close)
+        for button in (self.chapter_btn, self.delete_btn):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+    def _delete(self):
+        if self.gallery.delete_images([self.image]):
+            self.deleted.emit(self.image.id)
+            self.close()
+
+
+class InteractiveImagesGalleryDialog(QDialog):
+    """A scrollable grid of the book's AI images; each card shows the image, its chapter and the characters
+    present. Filter by character and chapter; select with ctrl / shift click or the checkboxes; Delete selected
+    removes the images and their figures through the shared, text-checked delete logic."""
+
+    def __init__(self, owner, output_dir, parent=None, *, confirm=True):
+        super().__init__(parent)
+        self.owner = owner
+        self.output_dir = output_dir
+        self.confirm = confirm
+        self.model = ipc.open_progress(output_dir)
+        self.images = []
+        self._by_id = {}
+        self._viewers = []
+        self.setWindowTitle("Interactive Images Gallery")
+        self.setStyleSheet(DIALOG_STYLE)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(int(screen.width() * 0.62), int(screen.height() * 0.78))
+        layout = QVBoxLayout(self)
+
+        filters = QHBoxLayout()
+        filters.addWidget(QLabel("Character:"))
+        self.character_combo = _house_combo(QComboBox())
+        self.character_combo.setMinimumWidth(180)
+        filters.addWidget(self.character_combo)
+        filters.addWidget(QLabel("Chapter:"))
+        self.chapter_combo = _house_combo(QComboBox())
+        self.chapter_combo.setMinimumWidth(200)
+        filters.addWidget(self.chapter_combo)
+        filters.addStretch(1)
+        self.count_label = QLabel("")
+        self.count_label.setStyleSheet("color: #a0aec0;")
+        filters.addWidget(self.count_label)
+        layout.addLayout(filters)
+
+        self.list = QListWidget()
+        self.list.setViewMode(QListView.IconMode)
+        self.list.setResizeMode(QListView.Adjust)
+        self.list.setMovement(QListView.Static)
+        self.list.setWrapping(True)
+        self.list.setWordWrap(True)
+        self.list.setUniformItemSizes(True)
+        self.list.setSpacing(8)
+        self.list.setIconSize(QSize(THUMB_SIZE, THUMB_SIZE))
+        self.list.setGridSize(QSize(THUMB_SIZE + 28, THUMB_SIZE + 62))
+        self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)   # ctrl / shift click
+        self.list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.list.setItemDelegate(_CardDelegate(self.list))
+        self.list.setStyleSheet("QListWidget::item { color: #e2e8f0; border-radius: 4px; } "
+                                "QListWidget::item:hover { background-color: #333c4a; } "
+                                "QListWidget::item:selected { background-color: #2f5f8f; color: white; }")
+        layout.addWidget(self.list, 1)
+
+        self.note = QLabel("")
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("color: #f6ad55; font-size: 9pt;")
+        self.note.hide()
+        layout.addWidget(self.note)
+
+        buttons = QHBoxLayout()
+        self.all_btn = _button("Select all", 'default')
+        self.none_btn = _button("Select none", 'default')
+        self.view_btn = _button("🔍 Open full size", 'info', "Open the highlighted image at full size")
+        self.chapter_btn = _button("📄 Go to chapter", 'info', "Open the highlighted image's chapter")
+        self.delete_btn = _button("🗑 Delete selected", 'danger',
+                                  "Delete the ticked / highlighted images and their figures in the chapters")
+        close_btn = _button("Close")
+        for button in (self.all_btn, self.none_btn, self.view_btn, self.chapter_btn, self.delete_btn):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        self.character_combo.currentIndexChanged.connect(lambda _i: self.render())
+        self.chapter_combo.currentIndexChanged.connect(lambda _i: self.render())
+        self.list.itemChanged.connect(lambda _item: self._update_buttons())
+        self.list.itemSelectionChanged.connect(self._update_buttons)
+        self.list.itemDoubleClicked.connect(lambda item: self.open_viewer(self._image_for(item)))
+        self.all_btn.clicked.connect(self.select_all)
+        self.none_btn.clicked.connect(self.select_none)
+        self.view_btn.clicked.connect(lambda: self.open_viewer(self._current_image()))
+        self.chapter_btn.clicked.connect(lambda: self.go_to_chapter(self._current_image()))
+        self.delete_btn.clicked.connect(self.delete_selected)
+        close_btn.clicked.connect(self.close)
+        self.reload()
+
+    # ---- data -----------------------------------------------------------------------------------
+    def reload(self):
+        """Read the progress file again and rebuild the filters and the grid."""
+        ipc.reload_progress(self.model)
+        self.images = ipc.gallery_images(self.model)
+        self._by_id = {image.id: image for image in self.images}
+        names = core.character_names(core.load_glossary_entries(self.output_dir))
+        self._fill_combo(self.character_combo, [(ALL_CHARACTERS, '')] +
+                         [(name, name) for name in ipc.gallery_characters(self.images, names)])
+        self._fill_combo(self.chapter_combo, [(ALL_CHAPTERS, '')] +
+                         [(label, key) for key, label in ipc.gallery_chapters(self.images)])
+        self.render()
+
+    @staticmethod
+    def _fill_combo(combo, rows):
+        current = combo.currentData()
+        blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            for label, data in rows:
+                combo.addItem(label, data)
+            index = combo.findData(current) if current else 0
+            combo.setCurrentIndex(max(0, index))
+        finally:
+            combo.blockSignals(blocked)
+
+    def visible_images(self):
+        return ipc.gallery_filter(self.images, self.character_combo.currentData() or '',
+                                  self.chapter_combo.currentData() or '')
+
+    def render(self):
+        keep = set(self.selected_ids())
+        blocked = self.list.blockSignals(True)
+        try:
+            self.list.clear()
+            for image in self.visible_images():
+                item = QListWidgetItem(_thumbnail(image.path), image.caption)
+                item.setData(Qt.UserRole, image.id)
+                item.setToolTip(f"{image.file}\n{image.prompt}" if image.prompt else image.file)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if image.id in keep else Qt.Unchecked)
+                item.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                self.list.addItem(item)
+        finally:
+            self.list.blockSignals(blocked)
+        self._update_buttons()
+
+    # ---- selection --------------------------------------------------------------------------------
+    def _image_for(self, item):
+        return self._by_id.get(item.data(Qt.UserRole)) if item is not None else None
+
+    def _current_image(self):
+        selected = self.selected_images()
+        if selected:
+            return selected[0]
+        return self._image_for(self.list.currentItem())
+
+    def selected_ids(self):
+        """Ticked or highlighted images (ctrl / shift click highlights, the checkbox ticks)."""
+        ids = []
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if item.checkState() == Qt.Checked or item.isSelected():
+                ids.append(item.data(Qt.UserRole))
+        return ids
+
+    def selected_images(self):
+        return [self._by_id[i] for i in self.selected_ids() if i in self._by_id]
+
+    def select_all(self):
+        blocked = self.list.blockSignals(True)
+        try:
+            for index in range(self.list.count()):
+                self.list.item(index).setCheckState(Qt.Checked)
+        finally:
+            self.list.blockSignals(blocked)
+        self._update_buttons()
+
+    def select_none(self):
+        blocked = self.list.blockSignals(True)
+        try:
+            for index in range(self.list.count()):
+                item = self.list.item(index)
+                item.setCheckState(Qt.Unchecked)
+                item.setSelected(False)
+        finally:
+            self.list.blockSignals(blocked)
+        self._update_buttons()
+
+    def _update_buttons(self):
+        count = len(self.selected_ids())
+        self.count_label.setText(f"{self.list.count()} of {len(self.images)} images | {count} selected")
+        self.delete_btn.setEnabled(count > 0)
+        self.view_btn.setEnabled(count > 0 or self.list.currentItem() is not None)
+        self.chapter_btn.setEnabled(self.view_btn.isEnabled())
+        self.delete_btn.setText(f"🗑 Delete selected ({count})" if count else "🗑 Delete selected")
+
+    # ---- actions ------------------------------------------------------------------------------------
+    def go_to_chapter(self, image):
+        if image is None:
+            return False
+        return open_path(os.path.join(self.output_dir, image.key))
+
+    def open_viewer(self, image):
+        if image is None:
+            return None
+        viewer = ImageViewerDialog(self, image, self)
+        viewer.setAttribute(Qt.WA_DeleteOnClose, True)
+        viewer.destroyed.connect(lambda *_a, v=viewer: self._viewers.remove(v) if v in self._viewers else None)
+        self._viewers.append(viewer)
+        viewer.show()
+        return viewer
+
+    def delete_selected(self):
+        return self.delete_images(self.selected_images())
+
+    def delete_images(self, images):
+        """Delete ``images`` after a confirmation: the shared ``delete_gallery_images`` (text-checked)."""
+        images = [image for image in images or () if image is not None]
+        if not images:
+            return 0
+        if self.confirm:
+            try:
+                from review_dialog import confirm_prompt_profile_action
+                if not confirm_prompt_profile_action(self, "Delete Images", ipc.gallery_delete_confirmation(len(images))):
+                    return 0
+            except Exception:
+                pass
+        result = ipc.delete_gallery_images(self.output_dir, images)
+        _log(self.owner, f"🗑 Interactive Images: deleted {result.deleted} image(s) from {result.chapters} chapter(s)")
+        if result.skipped:
+            self.note.setText(f"{len(result.skipped)} image(s) were kept: " + "; ".join(
+                f"{image.file}: {reason}" for image, reason in result.skipped[:3]))
+            self.note.show()
+        else:
+            self.note.hide()
+        self.reload()
+        return result.deleted
+
+
+def open_gallery_dialog(owner, anchor=None, output_dir=None):
+    """The gallery window of one book (toggles: the button that opens it closes it on the second click)."""
+    existing = getattr(owner, '_interactive_gallery_dialog', None)
+    try:
+        if existing is not None and existing.isVisible() and \
+                os.path.normcase(existing.output_dir) != os.path.normcase(str(output_dir)):
+            existing.close()                      # another book's gallery: replace it
+            owner._interactive_gallery_dialog = None
+    except RuntimeError:
+        owner._interactive_gallery_dialog = None
+
+    def make():
+        dialog = InteractiveImagesGalleryDialog(owner, output_dir, None)
+        _stay_above(dialog, anchor)
+        return dialog
+    return toggle_window(owner, '_interactive_gallery_dialog', make)
+
+
+# =============================================================================================
 # Runs (one at a time; a worker thread with a stop event)
 # =============================================================================================
 
@@ -1116,6 +1783,7 @@ class ImagesFilePanel(QWidget):
         self.stop_btn = _button("⏹ Stop", 'danger', "Stop after the current request")
         settings_btn = _button("⚙ Settings", 'default', "Interactive Images settings and this book's references")
         styles_btn = _button("🎨 Styles", 'info', "Interactive styles and the preview")
+        gallery_btn = _button("🖼 Gallery", 'accent', "Browse this book's images; delete them with multi-selection")
         try:
             from Retranslation_GUI import AnimatedRefreshButton
             self.refresh_btn = AnimatedRefreshButton("  Refresh")
@@ -1125,8 +1793,10 @@ class ImagesFilePanel(QWidget):
         self.stop_btn.clicked.connect(lambda: stop_run(self.owner))
         settings_btn.clicked.connect(lambda: open_settings_dialog(self.owner, self, self.output_dir))
         styles_btn.clicked.connect(lambda: open_styles_dialog(self.owner, self, self.output_dir))
+        gallery_btn.clicked.connect(lambda: open_gallery_dialog(self.owner, self, self.output_dir))
+        self.gallery_btn = gallery_btn
         self.refresh_btn.clicked.connect(self.full_refresh)
-        for button in (self.build_btn, self.stop_btn, settings_btn, styles_btn, self.refresh_btn):
+        for button in (self.build_btn, self.stop_btn, settings_btn, styles_btn, gallery_btn, self.refresh_btn):
             actions.addWidget(button)
         actions.addStretch(1)
         layout.addLayout(actions)
@@ -1336,16 +2006,7 @@ class ImagesFilePanel(QWidget):
         dialog.show()
 
     def _open_path(self, path, make=False):
-        if make:
-            os.makedirs(path, exist_ok=True)
-        if not os.path.exists(path):
-            return
-        try:
-            from PySide6.QtCore import QUrl
-            from PySide6.QtGui import QDesktopServices
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-        except Exception:
-            pass
+        open_path(path, make)
 
 
 def build_images_page(owner, window, host):
@@ -1443,7 +2104,9 @@ def build_images_page(owner, window, host):
 
 
 __all__ = [
-    'DIALOG_STYLE', 'FALLBACK_NOTE', 'ImagesFilePanel', 'InteractiveImagesDialog', 'InteractiveStylesDialog',
+    'DIALOG_STYLE', 'FALLBACK_NOTE', 'ImageViewerDialog', 'ImagesFilePanel', 'InteractiveImagesDialog',
+    'InteractiveImagesGalleryDialog', 'InteractiveStylesDialog', 'PlaceholderTextDialog', 'RatioPopup',
     'ReferencesEditor', 'StylePreview', 'add_interactive_styles_rows', 'build_images_page', 'current_run',
-    'open_settings_dialog', 'open_styles_dialog', 'run_bridge', 'start_run', 'stop_run', 'toggle_window',
+    'open_gallery_dialog', 'open_path', 'open_placeholder_dialog', 'open_settings_dialog', 'open_styles_dialog',
+    'run_bridge', 'start_run', 'stop_run', 'toggle_window',
 ]

@@ -480,6 +480,185 @@ def delete_entries(output_dir, targets, strip_html=True):
     return changed
 
 
+# ---------------------------------------------------------------------------------------------
+# Gallery: the book's AI images, one card each (desktop dialog and mobile sheet share this model)
+# ---------------------------------------------------------------------------------------------
+
+@dataclass
+class GalleryImage:
+    id: str                    # '<chapter key>|<file>': unique within a book
+    key: str                   # the chapter's output file name
+    chapter_number: int
+    chapter_title: str
+    index: int                 # 1-based position among the chapter's images
+    file: str                  # file name inside Interactive_Images/
+    path: str                  # full path
+    characters: List[str] = field(default_factory=list)   # the characters present in the scene
+    prompt: str = ''
+    aspect_ratio: str = ''
+
+    @property
+    def caption(self):
+        """``Ch. 12 · A, B`` (the card text)."""
+        names = ', '.join(self.characters)
+        return f"Ch. {self.chapter_number}" + (f" · {names}" if names else "")
+
+
+def gallery_images(model):
+    """The completed images of the book (their file exists), in chapter then image order."""
+    entries = model.data.get('chapters') or {}
+    folder = core.interactive_dir(model.output_dir)
+    out = []
+    for chapter in model.chapters:
+        entry = entries.get(chapter.key)
+        if not isinstance(entry, dict):
+            continue
+        for index, image in enumerate(entry.get('images') or (), 1):
+            if not isinstance(image, dict) or image.get('status') != 'completed' or not image.get('file'):
+                continue
+            name = os.path.basename(str(image['file']))
+            full = os.path.join(folder, name)
+            if not os.path.isfile(full):
+                continue
+            names = image.get('scene') or image.get('characters') or []
+            out.append(GalleryImage(f"{chapter.key}|{name}", chapter.key, chapter.number, chapter.title, index, name,
+                                    full, [str(n) for n in names if n], str(image.get('prompt') or ''),
+                                    str(image.get('aspect_ratio') or '')))
+    out.sort(key=lambda item: (item.chapter_number, item.key, item.index))
+    return out
+
+
+def gallery_characters(items, glossary_names=()):
+    """The names the character filter offers: the glossary's characters plus any name an image has, sorted
+    case-insensitively, each once."""
+    seen, names = set(), []
+    for name in list(glossary_names or ()) + [n for item in items or () for n in item.characters]:
+        name = ' '.join(str(name or '').split())
+        folded = name.casefold()
+        if name and folded not in seen:
+            seen.add(folded)
+            names.append(name)
+    return sorted(names, key=str.casefold)
+
+
+def gallery_chapters(items):
+    """``[(chapter key, label)]`` of the chapters that have images (the chapter filter)."""
+    seen, out = set(), []
+    for item in items or ():
+        if item.key not in seen:
+            seen.add(item.key)
+            title = f" {item.chapter_title}" if item.chapter_title else ''
+            out.append((item.key, f"Ch. {item.chapter_number}{title}"))
+    return out
+
+
+def gallery_filter(items, character='', chapter_key=''):
+    """The images with ``character`` in the scene (case-insensitive; '' = any) in chapter ``chapter_key``
+    ('' = any)."""
+    wanted = ' '.join(str(character or '').split()).casefold()
+    out = []
+    for item in items or ():
+        if chapter_key and item.key != chapter_key:
+            continue
+        if wanted and wanted not in {' '.join(n.split()).casefold() for n in item.characters}:
+            continue
+        out.append(item)
+    return out
+
+
+def gallery_thumbnail(path, size=256):
+    """JPEG bytes of an image scaled to fit ``size`` x ``size`` (the mobile gallery's cards; ``safe_image`` decodes
+    it); None when the file cannot be read."""
+    try:
+        from io import BytesIO
+
+        from safe_image import open_image
+
+        with open_image(path) as image:
+            picture = image.convert('RGB')
+        picture.thumbnail((int(size), int(size)))
+        buffer = BytesIO()
+        picture.save(buffer, format='JPEG', quality=82)
+        return buffer.getvalue()
+    except Exception:
+        return None
+
+
+def gallery_delete_confirmation(count):
+    """The gallery's Delete question (desktop dialog and mobile)."""
+    return (f"Delete {count} image(s)?\n"
+            "The image files are deleted and their figures are removed from the chapter files "
+            "(the text stays as it is).")
+
+
+@dataclass
+class GalleryDeleteResult:
+    deleted: int = 0
+    chapters: int = 0
+    skipped: list = field(default_factory=list)    # [(GalleryImage, reason)]
+
+
+def delete_gallery_images(output_dir, items):
+    """Delete single images: per chapter the figures are removed from the chapter file (text-checked: a chapter
+    whose text would change is left as it is and its images are kept), then the image files, then the
+    image records of the progress file (an entry left with no image and no class is removed, so the chapter
+    shows as not built). Returns a :class:`GalleryDeleteResult`."""
+    result = GalleryDeleteResult()
+    by_chapter = {}
+    for item in items or ():
+        by_chapter.setdefault(item.key, []).append(item)
+    if not by_chapter:
+        return result
+    chapters = {chapter.key: chapter for chapter in translated_chapters(output_dir)}
+    folder = core.interactive_dir(output_dir)
+    removed = {}                                      # chapter key -> set of file names
+    for key, group in by_chapter.items():
+        chapter = chapters.get(key)
+        if chapter is not None:
+            try:
+                with open(chapter.path, 'r', encoding='utf-8') as handle:
+                    original = handle.read()
+            except OSError as exc:
+                result.skipped.extend((item, f"chapter not readable: {exc}") for item in group)
+                continue
+            html = original
+            for item in group:
+                html = core.remove_figure(html, core.image_src(item.file))
+            if html != original:
+                ok, hint = core.check_text_unchanged(original, html)
+                if not ok:
+                    result.skipped.extend((item, f"the chapter text would change ({hint})") for item in group)
+                    continue
+                write_text_atomic(chapter.path, html)
+        for item in group:
+            try:
+                os.remove(os.path.join(folder, os.path.basename(item.file)))
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                result.skipped.append((item, f"could not delete the file: {exc}"))
+                continue
+            removed.setdefault(key, set()).add(item.file)
+            result.deleted += 1
+        if key in removed:
+            result.chapters += 1
+    path = core.progress_path(output_dir)
+    if removed and os.path.isfile(path):
+        def apply(data):
+            entries = data.get('chapters') or {}
+            for key, names in removed.items():
+                entry = entries.get(key)
+                if not isinstance(entry, dict):
+                    continue
+                entry['images'] = [image for image in entry.get('images') or ()
+                                   if not (isinstance(image, dict) and os.path.basename(str(image.get('file') or ''))
+                                           in names)]
+                if not entry['images'] and not entry.get('classes'):
+                    entries.pop(key, None)
+        mutate(path, apply)
+    return result
+
+
 #: Statuses "Retry failed" rebuilds.
 RETRY_STATUSES = ('failed', 'partial', 'rejected')
 
@@ -600,4 +779,6 @@ __all__ = [
     'open_progress', 'open_targets', 'pending_keys', 'plan_text', 'progress_signature', 'read_progress_file',
     'reload_progress', 'set_book_info', 'set_entry', 'set_status', 'strip_chapter_file', 'tab_count_text',
     'translated_chapters', 'translation_completed', 'write_json_atomic', 'write_text_atomic',
+    'GalleryDeleteResult', 'GalleryImage', 'delete_gallery_images', 'gallery_chapters', 'gallery_characters',
+    'gallery_delete_confirmation', 'gallery_filter', 'gallery_images', 'gallery_thumbnail',
 ]

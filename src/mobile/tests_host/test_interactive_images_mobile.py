@@ -293,6 +293,7 @@ def test_settings_schema_rows_and_the_epub_output_group():
         "interactive_images_max_references": ("int", 5), "interactive_images_auto_after_translation": ("bool", False),
         "interactive_images_recompile_after": ("bool", True), "interactive_css_enabled": ("bool", False),
         "interactive_images_resolution": ("choice", "1K"), "interactive_images_aspect_ratio": ("choice", "3:4"),
+        "interactive_images_include_gender": ("bool", True), "interactive_images_subjects": ("choice", "characters"),
     }
     for key, (kind, default) in expected.items():
         spec = schema.spec(key)
@@ -300,8 +301,13 @@ def test_settings_schema_rows_and_the_epub_output_group():
         assert default == core.DEFAULTS[key]
     assert schema.choice_values("interactive_images_resolution") == core.RESOLUTIONS
     assert schema.choice_values("interactive_images_aspect_ratio") == core.ASPECT_RATIOS
+    assert schema.choice_values("interactive_images_subjects") == core.SUBJECTS
+    # the Auto ratio checklist: a list stored by Tools > Interactive Images (read-only tile), default from the core
+    choices = schema.spec("interactive_images_aspect_choices")
+    assert choices.type == "list" and schema.effective_default("interactive_images_aspect_choices") == \
+        core.DEFAULTS["interactive_images_aspect_choices"]
     groups = dict(dict((s[0], s[3]) for s in CURATED_SECTIONS)["epub_output"])
-    assert set(groups["Interactive images"]) == set(expected)
+    assert set(groups["Interactive images"]) == set(expected) | {"interactive_images_aspect_choices"}
     assert any(link[2] == "tools.interactive-images" for link in STATIC_LINKS["epub_output"])
 
 
@@ -410,7 +416,9 @@ def test_tools_screen_styles_presets_native_preview_and_new_from_prompt(tmp_path
         screen, ctx, store, jobs = _screen(tmp_path)
         try:
             assert [o.key for o in screen.style_dropdown.options] == list(presets.BUILTIN_PRESET_NAMES)
-            assert len(presets.BUILTIN_PRESET_NAMES) == 12
+            assert len(presets.BUILTIN_PRESET_NAMES) == 22      # 12 + the fantasy / leveling-system presets
+            assert {"Arcane Runes", "Level Up Burst", "Dungeon System", "Guild Card"} <= {
+                o.key for o in screen.style_dropdown.options}
             # nothing renders before the Styles tab is on screen; then, with no WebView on a host run, the native
             # view (note, the classes the style defines, its CSS)
             assert screen.preview.renderer == "pending"
@@ -609,3 +617,302 @@ def test_images_view_without_a_workspace_says_so(tmp_path):
     view = pm.load_images_view(service, {"name": "x"})
     assert view.error == pm.IMAGES_NO_WORKSPACE and view.empty and not view.rows
     assert pm.images_action_reason(service, view, "build", []) == pm.IMAGES_NO_WORKSPACE
+
+
+# ==========================================================================
+# Round 2: gender / subjects / Auto ratio / placeholder texts / gallery / routing to the image key pool
+# ==========================================================================
+
+
+def test_tools_screen_gender_subjects_auto_ratio_and_placeholder_texts(tmp_path):
+    async def scenario():
+        screen, ctx, store, _jobs = _screen(tmp_path)
+        try:
+            # gender: default On, a switch of the desktop's key; the subjects dropdown lists the shared values
+            assert screen.gender_switch.value is True
+            screen.set_value("interactive_images_include_gender", False)
+            assert store["interactive_images_include_gender"] is False
+            assert [o.key for o in screen.subjects.options] == list(core.SUBJECTS) and screen.subjects.value == "characters"
+            screen.set_value("interactive_images_subjects", "both")
+            assert store["interactive_images_subjects"] == "both"
+            screen.set_value("interactive_images_subjects", "nonsense")
+            assert store["interactive_images_subjects"] == "characters"
+            # the Auto ratio chips show only while the ratio is Auto, and tick / untick the pool
+            assert "auto" in [o.key for o in screen.aspect.options] and "21:9" in [o.key for o in screen.aspect.options]
+            assert screen.ratio_row.visible is False
+            screen.set_value("interactive_images_aspect_ratio", "auto")
+            assert screen.ratio_row.visible is True and screen.ratio_hint.visible is True
+            chips = {c.key: c for c in screen.ratio_row.controls}
+            assert set(chips) == {f"ix-ratio-{r}" for r in core.ASPECT_CHOICES}
+            assert [k for k, c in chips.items() if c.selected] == [f"ix-ratio-{r}" for r in ("1:1", "3:4", "4:3", "16:9")]
+            assert screen.toggle_ratio("21:9") == ["1:1", "3:4", "4:3", "16:9", "21:9"]
+            assert store["interactive_images_aspect_choices"] == ["1:1", "3:4", "4:3", "16:9", "21:9"]
+            screen.toggle_ratio("1:1")
+            screen.toggle_ratio("3:4")
+            assert store["interactive_images_aspect_choices"] == ["4:3", "16:9", "21:9"]
+            assert {c.key: c.selected for c in screen.ratio_row.controls}["ix-ratio-21:9"] is True
+            settings = core.settings_from_config(store)
+            assert settings.aspect_ratio == "auto" and settings.aspect_choices == ("4:3", "16:9", "21:9")
+            screen.set_value("interactive_images_aspect_ratio", "16:9")
+            assert screen.ratio_row.visible is False
+            # placeholder texts: every one has a row; Edit -> the shared setter; Reset restores the default
+            names = [item["name"] for item in core.placeholder_text_defs()]
+            assert [c.key for c in screen.placeholder_rows.controls] == [f"ix-ph-{n}" for n in names]
+            assert screen.set_placeholder("character_gender", "{name} [{gender}]") is None
+            assert store[core.PLACEHOLDER_TEXTS_KEY] == {"character_gender": "{name} [{gender}]"}
+            assert core.format_character("Mira", "female", core.settings_from_config(store)) == "Mira"   # gender is Off
+            screen.set_value("interactive_images_include_gender", True)
+            assert core.format_character("Mira", "female", core.settings_from_config(store)) == "Mira [female]"
+            assert screen.set_placeholder("reference_line", "Ref {n}: {name}") is None
+            assert store["interactive_images_reference_line"] == "Ref {n}: {name}"
+            assert screen.set_placeholder("character_gender", core.placeholder_default("character_gender")) is None
+            assert store[core.PLACEHOLDER_TEXTS_KEY] == {}
+            assert screen.edit_placeholder("gender_male") is None      # the host test ctx has no Settings context
+            assert any("Settings context" in note for note in ctx.notes)
+        finally:
+            screen.dispose()
+
+    asyncio.run(scenario())
+
+
+def _gallery_book(tmp_path: Path) -> Path:
+    folder = tmp_path / "Output" / "Gallery"
+    folder.mkdir(parents=True)
+    images = folder / core.INTERACTIVE_FOLDER
+    images.mkdir()
+    chapters, entries = {}, {}
+    for n, who in ((1, ["Mira"]), (2, ["Mira", "Tomas"]), (3, [])):
+        name = f"response_{n:03d}_Chapter {n}.html"
+        image = f"Glossarion_ch{n:03d}_1.png"
+        html = f"<html><body><p>Chapter {n} text.</p>{core.figure_html(core.image_src(image))}</body></html>"
+        (folder / name).write_text(html, encoding="utf-8")
+        (images / image).write_bytes(_png())
+        chapters[str(n)] = {"output_file": name, "status": "completed", "actual_num": n}
+        entries[name] = {"chapter": n, "status": "completed", "source_hash": core.visible_text_hash(html),
+                         "images": [{"file": image, "status": "completed", "characters": who, "scene": who,
+                                     "prompt": f"scene {n}"}], "classes": []}
+    (folder / "translation_progress.json").write_text(json.dumps({"chapters": chapters}), encoding="utf-8")
+    (folder / "glossary.csv").write_text("type,raw_name,translated_name\ncharacter,미라,Mira\n"
+                                         "character,토마스,Tomas\ncharacter,하나,Hana\n", encoding="utf-8")
+    for key, entry in entries.items():
+        ipc.set_entry(core.progress_path(str(folder)), key, entry)
+    return folder
+
+
+def _gallery(tmp_path, **kwargs):
+    from glossarion_mobile.ui.library.images_gallery import ImagesGallery
+
+    u7 = _u7()
+    _conn, session = u7._tb()._fake_session("android")
+    ctx = u7._tools_ctx(session.page)
+    folder = _gallery_book(tmp_path)
+    return ImagesGallery(ctx, str(folder), **kwargs), ctx, folder
+
+
+def test_gallery_cards_filters_long_press_selection_and_multi_delete(tmp_path):
+    async def scenario():
+        from glossarion_mobile.ui.library.images_gallery import ALL_CHAPTERS, ALL_CHARACTERS
+
+        changed: list = []
+        gallery, ctx, folder = _gallery(tmp_path, on_changed=lambda: changed.append(1))
+        await gallery.load()
+        assert len(gallery.grid.controls) == 3 and gallery.count_text.value == "3 of 3 images"
+        assert [o.text for o in gallery.character_dd.options] == [ALL_CHARACTERS, "Hana", "Mira", "Tomas"]
+        assert [o.text for o in gallery.chapter_dd.options][0] == ALL_CHAPTERS and len(gallery.chapter_dd.options) == 4
+        assert [i.caption for i in gallery.visible()] == ["Ch. 1 · Mira", "Ch. 2 · Mira, Tomas", "Ch. 3"]
+        gallery.set_character("Tomas")
+        assert [i.file for i in gallery.visible()] == ["Glossarion_ch002_1.png"] and len(gallery.grid.controls) == 1
+        gallery.set_character("*")
+        gallery.set_chapter("response_003_Chapter 3.html")
+        assert len(gallery.visible()) == 1
+        gallery.set_chapter("*")
+        # a tap outside a selection opens the image; a long press starts selecting, then taps add / remove
+        viewer = gallery.tap(gallery.images[0].id)
+        assert viewer is not None and not gallery.selecting
+        gallery.long_press(gallery.images[0].id)
+        assert gallery.selecting and gallery.selected == {gallery.images[0].id}
+        assert gallery.selection_bar.visible and gallery.select_text.value == "1 selected"
+        gallery.tap(gallery.images[2].id)
+        assert len(gallery.selected) == 2 and gallery.delete_button.disabled is False
+        gallery.tap(gallery.images[0].id)
+        gallery.tap(gallery.images[0].id)
+        assert len(gallery.selected) == 2
+        gallery.select_all()
+        assert len(gallery.selected) == 3
+        gallery.exit_selection()
+        assert not gallery.selecting and not gallery.selected and not gallery.selection_bar.visible
+        # Delete selected: confirmed, shared text-checked delete, files + figures + records, the view reloads
+        gallery.long_press(gallery.images[0].id)
+        gallery.tap(gallery.images[2].id)
+        ctx.extras["answers"] = [False]
+        assert await gallery.delete_selected() == 0
+        assert (folder / core.INTERACTIVE_FOLDER / "Glossarion_ch001_1.png").exists()
+        ctx.extras["answers"] = [True]
+        assert await gallery.delete_selected() == 2
+        assert changed == [1] and len(gallery.images) == 1 and len(gallery.grid.controls) == 1
+        assert not gallery.selecting and gallery.images[0].file == "Glossarion_ch002_1.png"
+        assert not (folder / core.INTERACTIVE_FOLDER / "Glossarion_ch001_1.png").exists()
+        assert "data-glx" not in (folder / "response_001_Chapter 1.html").read_text(encoding="utf-8")
+        assert "data-glx" in (folder / "response_002_Chapter 2.html").read_text(encoding="utf-8")
+        # single image from the viewer: Go to chapter and Delete
+        opened: list = []
+        gallery.open_chapter = lambda image: opened.append(image.key)
+        viewer = gallery.open_viewer(gallery.images[0])
+        gallery.go_to_chapter(gallery.images[0])
+        assert opened == ["response_002_Chapter 2.html"]
+        ctx.extras["answers"] = [True]
+        assert await viewer.delete() == 1 and gallery.images == []
+        assert gallery.empty_text.visible and "No images" in gallery.empty_text.value
+
+    asyncio.run(scenario())
+
+
+def test_images_tab_opens_the_gallery_and_a_delete_reloads_the_rows(tmp_path, fake_models):
+    folder = _book(tmp_path, chapters=2)
+    _run_job(folder, dict(CONFIG))
+
+    async def scenario():
+        from glossarion_mobile.ui.library.images_gallery import ImagesGallery
+        from glossarion_mobile.ui.library.images_tab import ImagesTab
+
+        u7 = _u7()
+        _conn, session = u7._tb()._fake_session("android")
+        service = FakeService(folder)
+        ctx = u7._tools_ctx(session.page, service=service)
+        page = FakeBookPage(ctx, service, folder)
+        tab = ImagesTab(page)
+        page.images_tab = tab
+        u7._tools()._mount(session.page, tab.build())
+        await page.reload_images()
+        assert any(getattr(item, "key", "") == "ix-gallery" for item in tab.more_menu.items)
+        gallery = tab.open_gallery()
+        assert isinstance(gallery, ImagesGallery) and gallery.folder == str(folder)
+        await gallery.load()
+        assert len(gallery.images) == 2
+        gallery.open_chapter(gallery.images[0])
+        assert page.readers[-1] == {"chapter_filename": "response_001_Chapter 1.html", "mode": "translated"}
+        before = page.reloads
+        ctx.extras["answers"] = [True]
+        assert await gallery.delete_images([gallery.images[0]]) == 1
+        await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+        assert page.reloads > before
+
+    asyncio.run(scenario())
+
+
+def test_tools_screen_gallery_button_needs_a_book(tmp_path):
+    folder = _gallery_book(tmp_path)
+
+    async def scenario():
+        from glossarion_mobile.ui.tools import targets as tg
+
+        screen, ctx, _store, _jobs = _screen(tmp_path)
+        try:
+            assert screen.gallery_button.disabled is True and screen.open_gallery() is None
+            screen.set_target(tg.ToolTarget(title="Gallery", folder=str(folder), bid="0123456789ab"))
+            assert screen.gallery_button.disabled is False
+            gallery = screen.open_gallery()
+            await gallery.load()
+            assert len(gallery.images) == 3
+            gallery.open_chapter(gallery.images[0])
+            assert ctx.navigated[-1][0] == "library.book" and ctx.navigated[-1][2] == {"tab": "images"}
+        finally:
+            screen.dispose()
+
+    asyncio.run(scenario())
+
+
+# ---- the job path: images use the Image Gen / Edit key pool (when on), text never does ------------------
+
+
+@pytest.fixture
+def routed(monkeypatch):
+    """The real ``UnifiedClient`` behind the runner's own client factory, its provider call replaced by a recorder."""
+    from unified_api_client import UnifiedClient
+
+    for name in ("USE_INPAINTER_KEYS", "INPAINTER_API_KEYS", "ENABLE_IMAGE_OUTPUT_MODE", "USE_MULTI_API_KEYS",
+                 "USE_MULTI_KEYS", "BATCH_TRANSLATION"):
+        monkeypatch.delenv(name, raising=False)
+    for attr in ("_in_memory_inpainter_keys", "_inpainter_key_pool"):
+        monkeypatch.setattr(UnifiedClient, attr, None)
+    for name, value in (("BATCH_TRANSLATION", "0"), ("THREAD_SUBMISSION_DELAY_SECONDS", "0"),
+                        ("SEND_INTERVAL_SECONDS", "0"), ("USE_MULTI_API_KEYS", "0"), ("USE_MULTI_KEYS", "0")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(UnifiedClient, "_setup_client", lambda self: setattr(self, "client_type", "test"))
+    calls: list = []
+
+    def fake_send_internal(self, messages, *args, **kwargs):
+        from glossarion_mobile.diagnostics.fake_llm_server import planner_reply
+
+        image = bool(getattr(self, "_force_image_output_mode", False))
+        calls.append({"api_key": self.api_key, "image": image, "text_only": bool(getattr(self, "_text_output_only", False))})
+        if image:
+            self._get_thread_local_client()._last_generated_image_bytes = _png()
+            return "", "stop"
+        return planner_reply(messages[-1]["content"]), "stop"
+
+    monkeypatch.setattr(UnifiedClient, "_send_internal", fake_send_internal)
+    monkeypatch.setattr(UnifiedClient, "reset_cleanup_state", lambda self, *a, **k: None)
+    monkeypatch.setattr(UnifiedClient, "_log_pre_stagger", lambda self, *a: None)
+    monkeypatch.setattr(UnifiedClient, "_apply_thread_submission_delay", lambda self: None)
+    monkeypatch.setattr(UnifiedClient, "_should_abort_retry", lambda self: False)
+    monkeypatch.setattr(UnifiedClient, "_extract_chapter_label", lambda self, _m: None)
+    import unified_api_client as uac
+
+    monkeypatch.setattr(uac, "_api_watchdog_started", lambda *a, **k: None)
+    monkeypatch.setattr(uac, "_api_watchdog_finished", lambda *a, **k: None)
+    yield calls
+    UnifiedClient.clear_in_memory_inpainter_keys()
+
+
+POOL = [{"api_key": "img-key-a", "model": "gemini-3-pro-image-preview", "enabled": True}]
+
+
+def test_job_path_image_requests_use_the_image_pool_and_text_requests_never_do(tmp_path, routed):
+    folder = _book(tmp_path, chapters=1)
+    config = {"model": "fake-text-model", "api_key": "main-key", "interactive_images_image_model": "gpt-image-1",
+              "use_inpainter_keys": True, "inpainter_keys": POOL}
+    ctx, result, _events = _run_job(folder, config)
+    assert result == {"ok": True, "outputs": []}, ctx.logs
+    images = [c for c in routed if c["image"]]
+    texts = [c for c in routed if not c["image"]]
+    assert images and all(c["api_key"] == "img-key-a" for c in images)       # the pool key, not the main key
+    assert texts and all(c["api_key"] == "main-key" and c["text_only"] for c in texts)
+
+
+def test_job_path_with_the_pool_off_every_request_uses_the_normal_key(tmp_path, routed):
+    folder = _book(tmp_path, chapters=1)
+    config = {"model": "fake-text-model", "api_key": "main-key", "interactive_images_image_model": "gpt-image-1",
+              "use_inpainter_keys": False, "inpainter_keys": POOL}
+    ctx, result, _events = _run_job(folder, config)
+    assert result == {"ok": True, "outputs": []}, ctx.logs
+    assert routed and {c["api_key"] for c in routed} == {"main-key"}
+
+
+def test_job_path_carries_gender_subjects_and_the_auto_ratio_to_the_requests(tmp_path, routed, monkeypatch):
+    folder = _book(tmp_path, chapters=1)
+    (folder / "glossary.csv").write_text("type,raw_name,translated_name,gender\ncharacter,미라,Mira,Female\n"
+                                         "character,토마스,Tomas,Male\n", encoding="utf-8")
+    seen: list = []
+    from unified_api_client import UnifiedClient
+
+    original = UnifiedClient._send_internal
+
+    def spy(self, messages, *args, **kwargs):
+        seen.append({"image": bool(getattr(self, "_force_image_output_mode", False)),
+                     "ratio": getattr(self, "_forced_image_output_aspect_ratio", None),
+                     "text": messages[-1]["content"]})
+        return original(self, messages, *args, **kwargs)
+
+    monkeypatch.setattr(UnifiedClient, "_send_internal", spy)
+    config = {"model": "fake-text-model", "api_key": "main-key", "interactive_images_image_model": "gpt-image-1",
+              "interactive_images_aspect_ratio": "auto", "interactive_images_aspect_choices": ["21:9"],
+              "interactive_images_subjects": "both"}
+    ctx, result, _events = _run_job(folder, config)
+    assert result == {"ok": True, "outputs": []}, ctx.logs
+    planner = [c for c in seen if not c["image"]][0]["text"]
+    assert "Mira (female)" in planner and "Tomas (male)" in planner
+    assert core.placeholder_default("image_subjects_both") in planner
+    images = [c for c in seen if c["image"]]
+    assert images and {c["ratio"] for c in images} == {"21:9"}
