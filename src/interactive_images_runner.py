@@ -17,10 +17,13 @@ any request beyond what the active profile's prompts and their placeholders expa
 """
 
 import base64
+import contextlib
 import os
 import re
 import threading
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
@@ -50,6 +53,191 @@ class RunResult:
 
 class _Stop(Exception):
     pass
+
+
+# ---------------------------------------------------------------------------------------------
+# Batch mode (the translation's own settings: Batch Translation, batch size, threading delay, API call delay)
+# ---------------------------------------------------------------------------------------------
+
+#: The most chapters / requests in flight at once, whatever the batch size says.
+MAX_BATCH_WORKERS = 16
+
+
+@dataclass
+class BatchSettings:
+    """The translation's batch settings as this step reads them. ``enabled`` with ``size`` > 1 runs chapters (and a
+    chapter's image requests) in parallel, at most ``workers`` requests in flight; otherwise the step is sequential
+    exactly as before. The delay strings are the translation's env values (``SEND_INTERVAL_SECONDS`` and
+    ``SEND_INTERVAL_MAX_SECONDS``, ``THREAD_SUBMISSION_DELAY_SECONDS``)."""
+    enabled: bool = False
+    size: int = 1
+    send_interval: str = ''
+    send_interval_max: str = ''
+    thread_delay: str = ''
+
+    @property
+    def workers(self):
+        if not self.enabled:
+            return 1
+        try:
+            size = int(self.size)
+        except (TypeError, ValueError):
+            size = 1
+        return max(1, min(size, MAX_BATCH_WORKERS))
+
+    @property
+    def parallel(self):
+        return self.workers > 1
+
+    def thread_delay_seconds(self):
+        try:
+            return max(0.0, float(self.thread_delay))
+        except (TypeError, ValueError):
+            return 0.0
+
+
+def _truthy(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(value)
+
+
+def batch_settings_from_owner(owner):
+    """The translation's batch settings of the app (desktop window or the mobile HeadlessOwner): the live
+    ``batch_translation_var`` / ``batch_size_var`` / API call delay / threading delay fields, else the saved config."""
+    config = getattr(owner, 'config', None)
+    config = config if isinstance(config, dict) else {}
+    # a real owner always has the var; without one (and no saved value) there is no batch setting to follow
+    enabled = _truthy(getattr(owner, 'batch_translation_var', config.get('batch_translation', False)))
+    raw_size = getattr(owner, 'batch_size_var', None)
+    if raw_size in (None, ''):
+        raw_size = config.get('batch_size')
+    try:
+        size = int(str(raw_size).strip())
+    except (TypeError, ValueError):
+        from settings_rules import default_batch_size
+        size = default_batch_size(config.get('model'))
+    try:
+        from settings_rules import delay_env, delay_range_text, owner_delay_env
+        if getattr(owner, 'delay_entry', None) is not None:
+            interval, interval_max = owner_delay_env(owner, '2')
+        else:
+            interval, interval_max = delay_env(delay_range_text(config))
+    except Exception:
+        interval, interval_max = '2', ''
+    widget = getattr(owner, 'thread_delay_entry', None)
+    thread_delay = ''
+    if widget is not None:
+        try:
+            thread_delay = str(widget.text()).strip()
+        except Exception:
+            thread_delay = ''
+    if not thread_delay:
+        thread_delay = str(config.get('thread_submission_delay', '0.0001')).strip()
+    return BatchSettings(enabled=enabled, size=max(1, size), send_interval=str(interval),
+                         send_interval_max=str(interval_max or ''), thread_delay=thread_delay or '0.0001')
+
+
+@contextlib.contextmanager
+def _batch_environment(batch):
+    """The translation's env (``BATCH_TRANSLATION``, ``BATCH_SIZE``, the two delays) for a parallel run, put back after:
+    ``UnifiedClient`` reads them (batch mode lets requests overlap and keeps one request's failure from cancelling its
+    siblings; the API call delay staggers the request starts)."""
+    values = {'BATCH_TRANSLATION': '1', 'BATCH_SIZE': str(batch.workers),
+              'SEND_INTERVAL_SECONDS': batch.send_interval, 'SEND_INTERVAL_MAX_SECONDS': batch.send_interval_max,
+              'THREAD_SUBMISSION_DELAY_SECONDS': batch.thread_delay}
+    previous = {name: os.environ.get(name) for name in values}
+    try:
+        for name, value in values.items():
+            if name in ('SEND_INTERVAL_SECONDS', 'THREAD_SUBMISSION_DELAY_SECONDS') and value == '':
+                continue   # no value from the owner: whatever the process already has stays
+            os.environ[name] = value
+        yield
+    finally:
+        for name, old in previous.items():
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
+
+
+class _Clients:
+    """The step's clients. Sequential: one text client and one image client, made on first use, as before. Parallel:
+    a client is checked out for one request at a time (the image aspect ratio and the forced-image flags live on the
+    client, so two threads never share one); idle clients are reused, so at most ``workers`` exist per kind."""
+
+    def __init__(self, factory, models, config, output_dir):
+        self._factory = factory
+        self._models = models
+        self._config = config
+        self._output_dir = output_dir
+        self._idle = {'text': [], 'image': []}
+        self._made = {'text': 0, 'image': 0}
+        self._lock = threading.Lock()
+
+    def warm(self, kind):
+        """Make the first client of a kind now, so a client that cannot be made fails the chapter before any request
+        (as it always has), not one image at a time."""
+        with self._lock:
+            if not self._made[kind]:
+                self._idle[kind].append(self._factory(kind, self._models[kind], self._config, self._output_dir))
+                self._made[kind] += 1
+
+    @contextlib.contextmanager
+    def checkout(self, kind):
+        with self._lock:
+            client = self._idle[kind].pop() if self._idle[kind] else None
+        if client is None:
+            client = self._factory(kind, self._models[kind], self._config, self._output_dir)
+            with self._lock:
+                self._made[kind] += 1
+        try:
+            yield client
+        finally:
+            with self._lock:
+                self._idle[kind].append(client)
+
+
+class _Dispatcher:
+    """Bounds and paces the requests of a parallel run: at most ``workers`` in flight, request starts at least the
+    threading delay apart (the next-slot reservation ``UnifiedClient._apply_thread_submission_delay`` uses, shared by
+    every client here). Sequential runs (``workers`` 1) pass straight through. Both waits end with ``_Stop``."""
+
+    def __init__(self, batch, stop_event):
+        self.stop_event = stop_event
+        self.workers = batch.workers if batch is not None else 1
+        self.delay = batch.thread_delay_seconds() if batch is not None else 0.0
+        self._slots = threading.BoundedSemaphore(self.workers) if self.workers > 1 else None
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    @contextlib.contextmanager
+    def request(self):
+        if self._slots is None:
+            yield
+            return
+        while not self._slots.acquire(timeout=0.1):
+            _check_stop(self.stop_event)
+        try:
+            _check_stop(self.stop_event)
+            self._space_start()
+            yield
+        finally:
+            self._slots.release()
+
+    def _space_start(self):
+        if self.delay <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + self.delay
+        while True:
+            remaining = start - time.monotonic()
+            if remaining <= 0:
+                return
+            _check_stop(self.stop_event)
+            time.sleep(min(0.1, remaining))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -265,8 +453,13 @@ def prepare_stylesheet(config, output_dir, log):
 
 
 def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_event=None,
-                           on_progress: Optional[Callable] = None, client_factory=None, recompile=None):
+                           on_progress: Optional[Callable] = None, client_factory=None, recompile=None,
+                           batch: Optional[BatchSettings] = None):
     """Run the Interactive Images step on one book's output folder.
+
+    ``batch``: the translation's batch settings (:func:`batch_settings_from_owner`); None or Batch Translation off
+    (or batch size 1) = one request at a time. On, up to ``batch.workers`` chapters run at once and a chapter's image
+    requests overlap, with at most that many requests in flight.
 
     ``keys``: output file names to work on (default: every chapter that needs a build). ``stop_event``: a
     ``threading.Event`` checked between requests. ``on_progress(key, status)`` after each chapter step.
@@ -322,50 +515,85 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
     log(f"🖼 Interactive Images: {len(work)} chapter(s), {settings.per_chapter} image(s) per chapter, "
         f"text model {text_model}" + (f", image model {image_model}" if wants_images else ''))
 
-    text_client = None
-    image_client = None
-    for chapter in work:
-        if stop_event.is_set():
-            result.stopped = True
-            break
-        result.processed += 1
+    # batch mode (the translation's settings): chapters and a chapter's image requests overlap; off = one at a time
+    if batch is not None and not batch.parallel:
+        batch = None
+    clients = _Clients(client_factory, {'text': text_model, 'image': image_model}, config, output_dir)
+    dispatcher = _Dispatcher(batch, stop_event)
+    result_lock = threading.Lock()
+    notify_lock = threading.Lock()
+
+    def handle(chapter, chapter_log):
+        """One chapter, start to finish; a failure stays this chapter's. True when the run was stopped."""
+        with result_lock:
+            result.processed += 1
         if not ipc.translation_completed(chapter):
             ipc.set_status(path, chapter.key, 'skipped', f"translation status is {chapter.status or 'unknown'}")
-            result.skipped += 1
-            _notify(on_progress, chapter.key, 'skipped')
-            continue
+            with result_lock:
+                result.skipped += 1
+            _notify(on_progress, chapter.key, 'skipped', notify_lock)
+            return False
         try:
-            if text_client is None:
-                text_client = client_factory('text', text_model, config, output_dir)
-            if wants_images and image_client is None:
-                image_client = client_factory('image', image_model, config, output_dir)
-            status = _run_chapter(config, settings, output_dir, path, chapter, text_client, image_client,
+            clients.warm('text')
+            if wants_images:
+                clients.warm('image')
+            status = _run_chapter(config, settings, output_dir, path, chapter, clients, dispatcher,
                                   text_model, image_model, css_classes, (names, entries, tracker), name_map, refs,
-                                  max_refs, count_tokens, budget, stop_event, log, on_progress)
+                                  max_refs, count_tokens, budget, stop_event, chapter_log, on_progress, notify_lock,
+                                  batch)
         except _Stop:
             ipc.set_status(path, chapter.key, 'pending', 'stopped')
-            result.stopped = True
-            _notify(on_progress, chapter.key, 'pending')
-            break
+            with result_lock:
+                result.stopped = True
+            _notify(on_progress, chapter.key, 'pending', notify_lock)
+            return True
         except Exception as exc:
-            log(f"❌ Interactive Images {chapter.key}: {exc}")
+            chapter_log(f"❌ Interactive Images {chapter.key}: {exc}")
             if not isinstance(exc, (core.PlanError, RuntimeError)):
-                log(traceback.format_exc())
+                chapter_log(traceback.format_exc())
             ipc.set_status(path, chapter.key, 'failed', str(exc))
-            result.failed += 1
-            result.errors.append(f"{chapter.key}: {exc}")
-            _notify(on_progress, chapter.key, 'failed')
-            continue
-        if status in ('completed', 'css_only', 'partial'):
-            result.completed += 1
-            result.changed_files.append(chapter.key)
-        elif status == 'rejected':
-            result.rejected += 1
-        elif status == 'skipped':
-            result.skipped += 1
-        else:
-            result.failed += 1
-        _notify(on_progress, chapter.key, status)
+            with result_lock:
+                result.failed += 1
+                result.errors.append(f"{chapter.key}: {exc}")
+            _notify(on_progress, chapter.key, 'failed', notify_lock)
+            return False
+        with result_lock:
+            if status in ('completed', 'css_only', 'partial'):
+                result.completed += 1
+                result.changed_files.append(chapter.key)
+            elif status == 'rejected':
+                result.rejected += 1
+            elif status == 'skipped':
+                result.skipped += 1
+            else:
+                result.failed += 1
+        _notify(on_progress, chapter.key, status, notify_lock)
+        return False
+
+    if batch is None:
+        for chapter in work:
+            if stop_event.is_set():
+                result.stopped = True
+                break
+            if handle(chapter, log):
+                break
+    else:
+        log(f"⚡ Interactive Images batch mode: up to {batch.workers} requests in parallel")
+
+        def worker(chapter):
+            if stop_event.is_set():
+                with result_lock:
+                    result.stopped = True
+                return
+            tag = threading.current_thread().name   # every line of this chapter carries its worker's tag
+            handle(chapter, lambda message: log(f"[{tag}] {message}"))
+
+        with _batch_environment(batch), ThreadPoolExecutor(
+                max_workers=batch.workers, thread_name_prefix='ii-worker') as pool:
+            for future in [pool.submit(worker, chapter) for chapter in work]:
+                future.result()
+        order = {chapter.key: n for n, chapter in enumerate(work)}
+        result.changed_files.sort(key=lambda key: order.get(key, 0))
 
     try:
         result.images = ipc.image_stats(ipc.open_progress(output_dir)).get('images', 0)
@@ -383,10 +611,14 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
     return result
 
 
-def _notify(callback, key, status):
+def _notify(callback, key, status, lock=None):
     if callback is not None:
         try:
-            callback(key, status)
+            if lock is None:
+                callback(key, status)
+            else:
+                with lock:   # progress callbacks never run at the same time
+                    callback(key, status)
         except Exception:
             pass
 
@@ -396,9 +628,9 @@ def _check_stop(stop_event):
         raise _Stop()
 
 
-def _run_chapter(config, settings, output_dir, path, chapter, text_client, image_client, text_model, image_model,
+def _run_chapter(config, settings, output_dir, path, chapter, clients, dispatcher, text_model, image_model,
                  css_classes, characters, name_map, refs, max_refs, count_tokens, budget, stop_event, log,
-                 on_progress):
+                 on_progress, notify_lock=None, batch=None):
     names, entries, tracker = characters
     # confident genders at this chapter (glossary + gender tracker), written through the editable placeholder text
     genders = core.character_genders(entries, tracker, chapter.number) if settings.include_gender else {}
@@ -414,7 +646,7 @@ def _run_chapter(config, settings, output_dir, path, chapter, text_client, image
         ipc.set_status(path, chapter.key, 'skipped', 'no text paragraphs')
         return 'skipped'
     ipc.set_status(path, chapter.key, 'in_progress')
-    _notify(on_progress, chapter.key, 'in_progress')
+    _notify(on_progress, chapter.key, 'in_progress', notify_lock)
 
     # 1. plan
     title = core.chapter_title(base, chapter.title or chapter.key)
@@ -422,7 +654,8 @@ def _run_chapter(config, settings, output_dir, path, chapter, text_client, image
     for prompt, chunk, share in build_planner_prompts(settings, blocks, title, planner_names, css_classes,
                                                       budget=budget, count_tokens=count_tokens):
         _check_stop(stop_event)
-        reply = _send(text_client, _messages('', prompt), config, PLAN_CONTEXT)
+        with dispatcher.request(), clients.checkout('text') as text_client:
+            reply = _send(text_client, _messages('', prompt), config, PLAN_CONTEXT)
         plans.append(core.parse_plan(reply, len(blocks), css_classes, share, glossary_names=name_map))
     if settings.subjects == 'backgrounds':
         for plan in plans:   # Backgrounds only: a scene has no characters, whatever the model listed
@@ -464,8 +697,9 @@ def _run_chapter(config, settings, output_dir, path, chapter, text_client, image
     final = draft
     folder = core.interactive_dir(output_dir)
     kept_files = set()
-    for k, (block, item) in enumerate(placed_images, 1):
-        placeholder = _PENDING_SRC.format(k=k)
+
+    def make_image(k, block, item):
+        """One image: the request and its file. Returns the progress record (``file`` set when it succeeded)."""
         record = {'file': '', 'after_paragraph': block.n, 'quote': item.quote, 'characters': item.characters,
                   'prompt': item.prompt, 'refs': [], 'status': 'failed', 'error': ''}
         try:
@@ -476,7 +710,6 @@ def _run_chapter(config, settings, output_dir, path, chapter, text_client, image
             record['refs'] = [rel for _name, rel in picked]
             ratio = core.pick_aspect_ratio(settings, chapter.number, k)
             record['aspect_ratio'] = ratio
-            _set_image_aspect(image_client, ratio)
             user_text = core.fill_placeholders(settings.image_prompt, {
                 'scene_prompt': item.prompt,
                 'characters': ', '.join(core.format_character(name, genders.get(name), settings) for name in scene),
@@ -488,8 +721,11 @@ def _run_chapter(config, settings, output_dir, path, chapter, text_client, image
                 full = os.path.join(folder, rel)
                 if os.path.isfile(full):
                     content.append({'type': 'image_url', 'image_url': {'url': _data_url(full)}})
-            reply = _send(image_client, _messages(settings.image_system_prompt, content), config, IMAGE_CONTEXT)
-            data, ext = _image_bytes_from_response(image_client, reply)
+            with dispatcher.request(), clients.checkout('image') as image_client:
+                # a client serves one request at a time: its aspect ratio and the reply bytes are this request's own
+                _set_image_aspect(image_client, ratio)
+                reply = _send(image_client, _messages(settings.image_system_prompt, content), config, IMAGE_CONTEXT)
+                data, ext = _image_bytes_from_response(image_client, reply)
             name = core.image_filename(chapter.number, k, ext)
             target = os.path.join(folder, name)
             tmp = target + '.tmp'
@@ -499,16 +735,37 @@ def _run_chapter(config, settings, output_dir, path, chapter, text_client, image
             for other in core.chapter_images_on_disk(output_dir, chapter.number):
                 if other != name and other.rsplit('.', 1)[0] == name.rsplit('.', 1)[0]:
                     _remove(os.path.join(folder, other))  # same k, older extension
-            kept_files.add(name)
-            final = core.replace_image_src(final, placeholder, core.image_src(name))
             record.update(file=name, status='completed')
             log(f"🖼 {chapter.key}: image {k} saved as {name}")
         except _Stop:
             raise
         except Exception as exc:
             record['error'] = str(exc)
-            final = core.remove_figure(final, placeholder)
             log(f"⚠️ {chapter.key}: image {k} failed: {exc}")
+        return record
+
+    jobs = [(k, block, item) for k, (block, item) in enumerate(placed_images, 1)]
+    if batch is not None and len(jobs) > 1:
+        # the chapter's images overlap; the dispatcher keeps the requests of the whole run within the batch size
+        outcomes = []
+        with ThreadPoolExecutor(max_workers=min(len(jobs), batch.workers), thread_name_prefix='ii-image') as pool:
+            futures = [pool.submit(make_image, *job) for job in jobs]
+            for future in futures:
+                try:
+                    outcomes.append(future.result())
+                except _Stop as stop:
+                    outcomes.append(stop)
+        if any(isinstance(outcome, _Stop) for outcome in outcomes):
+            raise _Stop()
+    else:
+        outcomes = [make_image(*job) for job in jobs]
+    for (k, _block, _item), record in zip(jobs, outcomes):
+        placeholder = _PENDING_SRC.format(k=k)
+        if record['file']:
+            kept_files.add(record['file'])
+            final = core.replace_image_src(final, placeholder, core.image_src(record['file']))
+        else:
+            final = core.remove_figure(final, placeholder)
         records.append(record)
     for item in unplaced:
         records.append({'file': '', 'after_paragraph': item.after_paragraph, 'quote': item.quote,
@@ -654,7 +911,8 @@ def run_after_translation(owner, completed):
                 continue
             seen.add(key)
             results.append(run_interactive_images(
-                config, folder, log=log, stop_event=_OwnerStop(owner), recompile=owner_recompiler(owner)))
+                config, folder, log=log, stop_event=_OwnerStop(owner), recompile=owner_recompiler(owner),
+                batch=batch_settings_from_owner(owner)))
         return results
     except Exception as exc:
         log(f"⚠️ Interactive Images after translation failed: {exc}")
@@ -683,6 +941,6 @@ def generate_stylesheet(config, user_request, *, client_factory=None, output_dir
     return presets.scope_css(presets.extract_css_block(reply))
 
 
-__all__ = ['RunResult', 'build_planner_prompts', 'configure_image_key_pool', 'generate_stylesheet',
+__all__ = ['BatchSettings', 'RunResult', 'batch_settings_from_owner', 'build_planner_prompts', 'configure_image_key_pool', 'generate_stylesheet',
            'image_pool_model', 'owner_recompiler', 'prepare_stylesheet', 'run_after_translation',
            'run_interactive_images']

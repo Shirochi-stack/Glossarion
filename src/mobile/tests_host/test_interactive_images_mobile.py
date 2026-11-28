@@ -133,12 +133,13 @@ class FakeService:
         self.dirty += 1
 
 
-def _run_job(folder: Path, config: dict, keys=None, stop=False):
+def _run_job(folder: Path, config: dict, keys=None, stop=False, owner_fields=None):
     from glossarion_mobile import job_kinds
 
     u7 = _u7()
     events: list = []
-    ctx = u7.FakeCtx(types.SimpleNamespace(config=config), params={"keys": keys} if keys is not None else {},
+    ctx = u7.FakeCtx(types.SimpleNamespace(config=config, **(owner_fields or {})),
+                     params={"keys": keys} if keys is not None else {},
                      inputs=(str(folder),), config=config,
                      host=types.SimpleNamespace(emit=lambda kind, **data: events.append((kind, data))))
     ctx.stop = stop
@@ -917,3 +918,77 @@ def test_job_path_carries_gender_subjects_and_the_auto_ratio_to_the_requests(tmp
     assert core.placeholder_default("image_subjects_both") in planner
     images = [c for c in seen if c["image"]]
     assert images and {c["ratio"] for c in images} == {"21:9"}
+
+
+# ---- the job path in batch mode: the translation's Batch Translation / batch size run chapters in parallel -----
+
+
+def _latency_models(monkeypatch, hold=0.12):
+    """Fake clients (the planner / image answers of ``FakeClient``) that take ``hold`` seconds and record overlap."""
+    import threading
+    import time
+
+    state = {"now": 0, "peak": 0, "sent": [], "threads": set()}
+    lock = threading.Lock()
+
+    class SlowClient(FakeClient):
+        def send(self, messages, temperature=None, max_tokens=None, context=None):
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+                state["threads"].add(threading.current_thread().name)
+            try:
+                time.sleep(hold)
+                return FakeClient.send(self, messages, temperature, max_tokens, context)
+            finally:
+                with lock:
+                    state["now"] -= 1
+
+    monkeypatch.setattr(runner, "_default_client_factory",
+                        lambda kind, model, config, output_dir: SlowClient(kind, state["sent"]))
+    monkeypatch.setattr(runner, "configure_image_key_pool", lambda config, log: None)
+    return state
+
+
+def _owner_fields(batch_on: bool, size):
+    return {"batch_translation_var": batch_on, "batch_size_var": str(size),
+            "delay_entry": types.SimpleNamespace(text=lambda: "0"),
+            "thread_delay_entry": types.SimpleNamespace(text=lambda: "0")}
+
+
+def test_job_path_with_batch_on_builds_chapters_in_parallel_and_counts_progress(tmp_path, monkeypatch):
+    state = _latency_models(monkeypatch)
+    folder = _book(tmp_path, chapters=6)
+    ctx, result, events = _run_job(folder, dict(CONFIG), owner_fields=_owner_fields(True, 3))
+    assert result == {"ok": True, "outputs": []}, ctx.logs
+    assert ctx.results["interactive_images"]["completed"] == 6 and ctx.results["interactive_images"]["failed"] == 0
+    assert 2 <= state["peak"] <= 3                                        # parallel, within the batch size
+    assert len(state["threads"]) > 1
+    assert sorted(kind for kind, _c, _m in state["sent"]) == ["image"] * 6 + ["text"] * 6
+    progress = [data for kind, data in events if kind == "progress"]
+    assert progress[0]["completed"] == 0 and progress[-1]["completed"] == 6   # each chapter counts, capped at the total
+    assert all(p["completed"] <= p["total"] for p in progress)
+    for n in range(1, 7):
+        html = (folder / f"response_{n:03d}_Chapter {n}.html").read_text(encoding="utf-8")
+        assert f'src="Interactive_Images/Glossarion_ch{n:03d}_1.png"' in html
+        assert core.check_text_unchanged(CH.format(n=n), html)[0]
+    assert any(line.startswith("[ii-worker_") for line in ctx.logs)
+    assert os.environ.get("BATCH_TRANSLATION") != "1"
+
+
+def test_job_path_with_batch_off_stays_one_request_at_a_time(tmp_path, monkeypatch):
+    state = _latency_models(monkeypatch, hold=0.03)
+    folder = _book(tmp_path, chapters=3)
+    ctx, result, _events = _run_job(folder, dict(CONFIG), owner_fields=_owner_fields(False, 3))
+    assert result == {"ok": True, "outputs": []}, ctx.logs
+    assert state["peak"] == 1
+    assert [kind for kind, _c, _m in state["sent"]] == ["text", "image"] * 3
+    assert not any(line.startswith("[ii-worker_") for line in ctx.logs)
+
+
+def test_job_path_with_batch_on_honours_stop(tmp_path, monkeypatch):
+    state = _latency_models(monkeypatch, hold=0.03)
+    folder = _book(tmp_path, chapters=6)
+    ctx, result, _events = _run_job(folder, dict(CONFIG), stop=True, owner_fields=_owner_fields(True, 3))
+    assert result == {"ok": None, "outputs": []} and ctx.results["interactive_images"]["stopped"] is True
+    assert state["sent"] == [] and not list((folder / "Interactive_Images").glob("Glossarion_*.png"))
