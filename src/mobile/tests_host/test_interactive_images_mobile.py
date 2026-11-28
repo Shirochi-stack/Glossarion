@@ -116,6 +116,9 @@ class FakeService:
     def workspace_for(self, book):
         return self.folder
 
+    def config_snapshot(self):
+        return {}
+
     def has_job_kind(self, kind):
         return kind in self.kinds
 
@@ -347,6 +350,12 @@ def test_tools_screen_profile_and_models_write_the_desktop_keys(tmp_path):
             assert screen.set_per_chapter("3") is None
             assert store["interactive_images_per_chapter"] == "3"
             assert store["interactive_images_prompt_profile_default"]["per_chapter"] == "3"
+            # the art style is the profile's art_style field (default: anime, never realistic) and its runtime key
+            assert screen.art_style.value == "Anime illustration, clean line art, cel shading"
+            assert screen.set_art_style("Watercolor") is None
+            assert store["interactive_images_art_style"] == "Watercolor"
+            assert store["interactive_images_prompt_profile_default"]["art_style"] == "Watercolor"
+            assert screen.set_art_style("Anime illustration, clean line art, cel shading") is None
             screen.bar.select("Styles only")
             assert store["active_interactive_images_prompt_profile"] == "Styles only"
             assert store["interactive_images_per_chapter"] == "0" and screen.per_chapter.value == "0"

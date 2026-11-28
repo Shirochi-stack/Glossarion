@@ -191,15 +191,40 @@ def test_glossary_timer_runs_only_while_visible_and_current(tmp_path):
     assert timer.isActive()
 
 
-def test_glossary_button_switches_to_the_glossary_tab_on_the_same_file(tmp_path):
+def test_the_translation_page_has_no_duplicate_tab_buttons_inside_the_tabbed_window(tmp_path):
+    """The window's tabs are the way to the Glossary and Interactive Images pages: the title row has no buttons
+    of the same names (the Glossary Progress button is only for a page shown outside a window with that tab)."""
     from PySide6.QtWidgets import QPushButton
 
+    _host, window, sources = _open(tmp_path, 2)
+    page = window._pm_page_data[os.path.abspath(sources[0])]["container"]
+    texts = [b.text() for b in page.findChildren(QPushButton)]
+    assert not [t for t in texts if "Glossary Progress" in t or "Interactive Images" in t]
+    # the folder is still registered for the Images tab
+    assert window._pm_images_output_dirs
+
+
+def test_the_glossary_progress_button_stays_on_a_page_outside_a_tabbed_window(tmp_path):
+    """A page with no window that has a Glossary tab keeps its Glossary Progress button (it opens a one-tab window)."""
+    from PySide6.QtWidgets import QPushButton
+
+    sources, config = _books(tmp_path, 1)
+    host = pl.make_host(pl.current_rg(), config)
+    host.selected_files = list(sources)
+    result = host._force_retranslation_epub_or_text(sources[0])
+    pl.pump(30, timeout=0.3)
+    dialog = result["dialog"] if isinstance(result, dict) and result.get("dialog") is not None else None
+    assert dialog is not None
+    texts = [b.text() for b in dialog.findChildren(QPushButton)]
+    assert any("Glossary Progress" in t for t in texts)
+    assert not [t for t in texts if "Interactive Images" in t]
+
+
+def test_the_glossary_opener_switches_to_the_glossary_tab_on_the_same_file(tmp_path):
     _host, window, sources = _open(tmp_path, 3)
     window._pm_select_file(sources[1])
     pl.pump(30, timeout=0.2)
-    page = window._pm_page_data[os.path.abspath(sources[1])]["container"]
-    button = next(b for b in page.findChildren(QPushButton) if "Glossary Progress" in b.text())
-    button.click()
+    window._show_glossary_progress()
     pl.pump(30, timeout=0.3)
     assert _tab_name(window) == "glossary"
     assert os.path.normcase(window._pm_current_file()) == os.path.normcase(os.path.abspath(sources[1]))

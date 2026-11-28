@@ -8246,7 +8246,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 signature = ipc.book_signature(folder)
                 cached = dialog._pm_images_counts.get(folder)
                 if cached is None or cached[0] != signature:
-                    model = ipc.open_progress(folder)
+                    model = ipc.open_progress(folder, ipc.glossary_skip_rules(getattr(self, 'config', None), self))
                     cached = (signature, ipc.tab_count_text(ipc.image_stats(model)))
                     dialog._pm_images_counts[folder] = cached
                 _set_tab_count('images', cached[1])
@@ -9216,30 +9216,35 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         _glossary_refinement_expected_entries = _gp_locator._glossary_refinement_expected_entries
         _find_glossary_for_refinement = _gp_locator._find_glossary_for_refinement
         
-        glossary_progress_btn = QPushButton("📊 Glossary Progress")
-        glossary_progress_btn.setCursor(Qt.PointingHandCursor)
-        glossary_progress_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2d6a4f;
-                color: #d8f3dc;
-                border: 1px solid #40916c;
-                border-radius: 4px;
-                padding: 3px 10px;
-                font-size: 9pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #40916c;
-                border-color: #52b788;
-            }
-        """)
-        # Always show; the dialog has an empty-state panel until progress exists.
-        _initial_glossary_progress_file = _find_glossary_progress_file()
-        glossary_progress_btn.setVisible(True)
-        if _initial_glossary_progress_file:
-            glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{_initial_glossary_progress_file}")
-        else:
-            glossary_progress_btn.setToolTip("View glossary extraction progress")
+        # The Progress Manager window's Glossary tab shows this page: the title-row button is only for a page
+        # shown outside a window that has one (its _show_glossary_progress opens a one-tab window).
+        _has_glossary_tab = 'glossary' in (getattr(parent_dialog, '_pm_tab_pages', None) or {})
+        glossary_progress_btn = None
+        if not _has_glossary_tab:
+            glossary_progress_btn = QPushButton("📊 Glossary Progress")
+            glossary_progress_btn.setCursor(Qt.PointingHandCursor)
+            glossary_progress_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2d6a4f;
+                    color: #d8f3dc;
+                    border: 1px solid #40916c;
+                    border-radius: 4px;
+                    padding: 3px 10px;
+                    font-size: 9pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #40916c;
+                    border-color: #52b788;
+                }
+            """)
+            # Always show; the dialog has an empty-state panel until progress exists.
+            _initial_glossary_progress_file = _find_glossary_progress_file()
+            glossary_progress_btn.setVisible(True)
+            if _initial_glossary_progress_file:
+                glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{_initial_glossary_progress_file}")
+            else:
+                glossary_progress_btn.setToolTip("View glossary extraction progress")
 
         def _sdlxliff_sidecar_paths_for_output_dir(_output_dir):
             sidecar_dir = os.path.join(_output_dir or "", "SDLXLIFF")
@@ -12572,33 +12577,13 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             parent_dialog._pm_register_glossary(
                 file_path, _build_gp_file_panel, _build_glossary_page, _gp_count_stats
             )
-        glossary_progress_btn.clicked.connect(_show_glossary_progress)
-        title_layout.addWidget(glossary_progress_btn)
+        if glossary_progress_btn is not None:
+            glossary_progress_btn.clicked.connect(_show_glossary_progress)
+            title_layout.addWidget(glossary_progress_btn)
 
-        # ── Interactive Images: this file's output folder for the window's tab, and the shortcut to it ──
+        # ── Interactive Images: this file's output folder for the window's tab (the tab is the way in) ──
         if callable(getattr(parent_dialog, '_pm_register_images', None)):
             parent_dialog._pm_register_images(file_path, output_dir)
-            interactive_images_btn = QPushButton("🖼 Interactive Images")
-            interactive_images_btn.setCursor(Qt.PointingHandCursor)
-            interactive_images_btn.setToolTip("Illustrations and style classes for the translated chapters")
-            interactive_images_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #4c2f73;
-                    color: #ede0ff;
-                    border: 1px solid #7a52b3;
-                    border-radius: 4px;
-                    padding: 3px 10px;
-                    font-size: 9pt;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #6d47a3;
-                    border-color: #c084fc;
-                }
-            """)
-            interactive_images_btn.clicked.connect(
-                lambda _checked=False, _fp=file_path: parent_dialog._pm_show_tab('images', _fp))
-            title_layout.addWidget(interactive_images_btn)
         
         # Periodic check: show/hide button based on file existence (3s)
         # Uses single-pass caching to avoid redundant filesystem scans
@@ -12627,18 +12612,19 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 if callable(getattr(parent_dialog, '_pm_update_glossary_count', None)):
                     # Glossary tab label: completed/total of the current file
                     parent_dialog._pm_update_glossary_count()
-                glossary_progress_btn.setVisible(True)
-                if any_exists:
-                    count = len(found_paths)
-                    if count == 1:
-                        gp = next(iter(found_paths.values()))
-                        glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{gp}")
+                if glossary_progress_btn is not None:   # absent inside a window that has the Glossary tab
+                    glossary_progress_btn.setVisible(True)
+                    if any_exists:
+                        count = len(found_paths)
+                        if count == 1:
+                            gp = next(iter(found_paths.values()))
+                            glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{gp}")
+                        else:
+                            glossary_progress_btn.setToolTip(f"View glossary extraction progress ({count}/{len(all_epubs)} files)")
+                    elif is_multi:
+                        glossary_progress_btn.setToolTip(f"View glossary extraction progress ({len(all_epubs)} files)")
                     else:
-                        glossary_progress_btn.setToolTip(f"View glossary extraction progress ({count}/{len(all_epubs)} files)")
-                elif is_multi:
-                    glossary_progress_btn.setToolTip(f"View glossary extraction progress ({len(all_epubs)} files)")
-                else:
-                    glossary_progress_btn.setToolTip("View glossary extraction progress")
+                        glossary_progress_btn.setToolTip("View glossary extraction progress")
                 _update_text_analysis_button()
             except RuntimeError:
                 # Widget was deleted

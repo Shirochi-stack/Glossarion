@@ -520,13 +520,13 @@ def chunk_image_share(max_images, chunk_len, total_len):
 
 PLANNER_PLACEHOLDERS = ('images_per_chapter', 'character_names', 'image_subjects', 'css_classes', 'chapter_title',
                         'paragraphs')
-IMAGE_PLACEHOLDERS = ('scene_prompt', 'characters', 'reference_list')
+IMAGE_PLACEHOLDERS = ('scene_prompt', 'characters', 'art_style', 'glossary_entries', 'reference_list')
 CSS_PLACEHOLDERS = ('user_request', 'css_classes')
 REFERENCE_LINE_PLACEHOLDERS = ('n', 'name')
 #: Placeholders whose template line is removed when they expand to nothing (the glossary placeholders'
 #: rule: an empty text removes the line), so the default "Characters" mode and a scene without characters
 #: leave no empty label behind.
-LINE_DROP_PLACEHOLDERS = ('image_subjects', 'characters')
+LINE_DROP_PLACEHOLDERS = ('image_subjects', 'characters', 'glossary_entries', 'art_style')
 
 
 def fill_placeholders(template, values, drop_empty=()):
@@ -940,6 +940,7 @@ DEFAULTS = {
     'interactive_images_planner_max_input_tokens': 0,
     'interactive_images_reference_line': 'Image {n}: {name}',
     'interactive_images_per_chapter': '1',
+    'interactive_images_art_style': 'Anime illustration, clean line art, cel shading',
     'interactive_images_include_gender': True,
     'interactive_images_subjects': 'characters',
     'interactive_images_aspect_choices': ['1:1', '3:4', '4:3', '16:9'],   # in ASPECT_CHOICES order
@@ -1038,6 +1039,7 @@ class InteractiveImagesSettings:
     css_preset: str
     include_gender: bool = True
     subjects: str = 'characters'
+    art_style: str = DEFAULTS['interactive_images_art_style']
     aspect_choices: tuple = DEFAULT_ASPECT_CHOICES
     placeholder_texts: dict = field(default_factory=dict)   # the stored expansion texts ({name: text})
 
@@ -1064,6 +1066,19 @@ def upgrade_draft_planner(text):
     return current if str(text) == legacy else text
 
 
+#: The image prompt before ``{art_style}`` was added: a profile still holding exactly this gets the current default.
+OLD_DEFAULT_IMAGE_PROMPT = "{scene_prompt}\nCharacters: {characters}\n{reference_list}"
+
+
+def upgrade_old_image_prompt(text):
+    """A stored image prompt that is exactly the earlier default (before the ``Art style`` line) becomes the
+    current default, so an unedited profile draws in the art style instead of photo-real people; any text the
+    user edited stays as it is."""
+    import prompt_defaults as pd
+
+    return pd.DEFAULT_INTERACTIVE_IMAGES_IMAGE_PROMPT if str(text) == OLD_DEFAULT_IMAGE_PROMPT else text
+
+
 def settings_from_config(config):
     """The step's settings from an owner config (the active profile's prompts are its runtime keys)."""
     import prompt_defaults as pd
@@ -1072,6 +1087,8 @@ def settings_from_config(config):
         value = (config or {}).get(key)
         if value is not None and key == 'interactive_images_planner_prompt':
             value = upgrade_draft_planner(value)
+        if value is not None and key == 'interactive_images_image_prompt':
+            value = upgrade_old_image_prompt(value)
         return default if value is None else str(value)
 
     try:
@@ -1102,6 +1119,7 @@ def settings_from_config(config):
         css_preset=str(_cfg(config, 'interactive_css_preset') or 'Classic Book'),
         include_gender=_bool(_cfg(config, 'interactive_images_include_gender')),
         subjects=coerce_setting('interactive_images_subjects', _cfg(config, 'interactive_images_subjects')),
+        art_style=str(_cfg(config, 'interactive_images_art_style')).strip(),
         aspect_choices=tuple(coerce_aspect_choices(_cfg(config, 'interactive_images_aspect_choices'))),
         placeholder_texts=stored_placeholder_texts(config),
     )
@@ -1122,6 +1140,7 @@ REFERENCE_LINE_KEY = 'interactive_images_reference_line'
 
 _CHARACTER_GENDER_TEXT = '{name} ({gender})'
 _REFERENCE_LINE_TEXT = DEFAULTS[REFERENCE_LINE_KEY]
+_GLOSSARY_ENTRY_LINE_TEXT = '{name}: {description}'
 _SUBJECT_TEXTS = {
     'characters': '',
     'backgrounds': ("Illustrate scenery and places only, with no characters in the picture: leave the "
@@ -1155,11 +1174,15 @@ def placeholder_text_defs():
         {'name': 'reference_line', 'default': _REFERENCE_LINE_TEXT,
          'note': ("One line of {reference_list} in the image prompt per attached reference image. "
                   "Tokens: {n} (1, 2, ...), {name}.")},
+        {'name': 'glossary_entry_line', 'default': _GLOSSARY_ENTRY_LINE_TEXT,
+         'note': ("One line of {glossary_entries} in the image prompt per glossary entry relevant to the picture. "
+                  "Tokens: {name}, {description}. An entry without a description is just its name.")},
     ]
 
 
 #: The ``{tokens}`` a placeholder text may contain (the editors list them next to the text).
-PLACEHOLDER_TEXT_TOKENS = {'character_gender': ('name', 'gender'), 'reference_line': ('n', 'name')}
+PLACEHOLDER_TEXT_TOKENS = {'character_gender': ('name', 'gender'), 'reference_line': ('n', 'name'),
+                           'glossary_entry_line': ('name', 'description')}
 
 
 def placeholder_default(name):
@@ -1273,6 +1296,12 @@ def prompt_placeholder_values(field, config, output_dir=None, owner=None):
         values['characters'] = per_request(
             "the characters of that scene (with a gender when confident); a scene without characters removes "
             "its line.")
+        values['art_style'] = {
+            'text': settings.art_style,
+            'extra': "The Art style setting (per prompt profile); an empty text removes its line."}
+        values['glossary_entries'] = per_request(
+            "one line per glossary entry this picture needs (a character of the scene, or a term the scene "
+            "prompt names), each written with the glossary entry line text; no relevant entry removes its line.")
         values['reference_list'] = per_request(
             "one line per attached reference image: " + fill_placeholders(
                 settings.reference_line, {'n': 1, 'name': placeholder_text(settings, 'style_reference')}))
@@ -1288,6 +1317,7 @@ PLACEHOLDER_TOKEN_DESCRIPTIONS = {
     'name': "the character's name (in a reference line: the character's name, or the art-style text for a style image).",
     'gender': "the gender word of the character: the male or female placeholder text.",
     'n': "the number of the reference image in the request: 1, 2, ...",
+    'description': "the glossary entry's description (its custom description field).",
 }
 
 
@@ -1473,8 +1503,37 @@ def format_character(name, gender, settings):
     return fill_placeholders(fmt, {'name': name, 'gender': label})
 
 
+def relevant_glossary_entries_text(entries, scene, scene_prompt, settings):
+    """``{glossary_entries}``: one line per glossary entry this picture needs, in glossary order, each once (by
+    display name): an entry whose translated or raw name is one of the picture's characters (``scene``), or whose
+    translated name appears as a whole word (case-insensitive) in ``scene_prompt``. Any entry type counts. A line is
+    the ``glossary_entry_line`` placeholder text; an entry without a description is just its name."""
+    wanted = {_norm_space(name).casefold() for name in scene or () if _norm_space(name)}
+    prompt = str(scene_prompt or '')
+    template = placeholder_text(settings, 'glossary_entry_line')
+    if not template.strip():
+        return ''
+    lines, seen = [], set()
+    for entry in entries or ():
+        translated = _norm_space(entry.get('translated_name'))
+        raw = _norm_space(entry.get('raw_name'))
+        display = translated or raw
+        if not display or display.casefold() in seen:
+            continue
+        relevant = bool({translated.casefold(), raw.casefold()} & wanted - {''})
+        if not relevant and translated:
+            relevant = re.search(r'(?<!\w)' + re.escape(translated) + r'(?!\w)', prompt, re.I) is not None
+        if not relevant:
+            continue
+        seen.add(display.casefold())
+        description = _norm_space(entry.get('description'))
+        lines.append(fill_placeholders(template, {'name': display, 'description': description})
+                     if description else display)
+    return '\n'.join(lines)
+
+
 def pick_aspect_ratio(settings, chapter_number, index):
-    """The ratio of image ``index`` (1-based) of chapter ``chapter_number``: the fixed ratio, or -- with Auto --
+    """The ratio of image ``index`` (1-based) of chapter ``chapter_number`` (its position in the book): the fixed ratio, or -- with Auto --
     one of the ticked ratios chosen pseudo-randomly from a hash of ``chapter:index`` (stable across reruns of
     the same chapter, different between images). '' = send no ratio (Auto with nothing ticked)."""
     ratio = str(settings.aspect_ratio or '')
@@ -1503,6 +1562,7 @@ def _profiles_base():
 def builtin_profile_texts(per_chapter):
     import prompt_defaults as pd
     return {
+        'art_style': DEFAULTS['interactive_images_art_style'],
         'planner': pd.DEFAULT_INTERACTIVE_IMAGES_PLANNER_PROMPT,
         'image_system': pd.DEFAULT_INTERACTIVE_IMAGES_IMAGE_SYSTEM_PROMPT,
         'image': pd.DEFAULT_INTERACTIVE_IMAGES_IMAGE_PROMPT,
@@ -1519,7 +1579,7 @@ class InteractiveImagesProfiles(_profiles_base()):
     model needed). Every action writes the three profile keys and the active profile's runtime keys
     (``interactive_images_*_prompt``, ``interactive_images_per_chapter``) into ``owner.config``."""
 
-    FIELDS = ('planner', 'image_system', 'image', 'css', 'per_chapter')
+    FIELDS = ('planner', 'image_system', 'image', 'css', 'per_chapter', 'art_style')
     PROFILES_KEY = 'interactive_images_prompt_profiles'
     DEFAULT_KEY = 'interactive_images_prompt_profile_default'
     ACTIVE_KEY = 'active_interactive_images_prompt_profile'
@@ -1529,6 +1589,7 @@ class InteractiveImagesProfiles(_profiles_base()):
         'interactive_images_image_prompt',
         'interactive_images_css_prompt',
         'interactive_images_per_chapter',
+        'interactive_images_art_style',
     )
     LABEL = 'interactive images prompt profile'
     DEFAULT_BUILTIN = builtin_profile_texts(1)
@@ -1544,6 +1605,7 @@ class InteractiveImagesProfiles(_profiles_base()):
     def _clean_set(self, value, fallback):
         cleaned = super()._clean_set(value, fallback)
         cleaned['planner'] = upgrade_draft_planner(cleaned.get('planner', ''))
+        cleaned['image'] = upgrade_old_image_prompt(cleaned.get('image', ''))
         return cleaned
 
     def _write_runtime(self, texts):
@@ -1566,6 +1628,7 @@ def profile_texts_for_run(config):
         'image': settings.image_prompt,
         'css': settings.css_prompt,
         'per_chapter': str(settings.per_chapter),
+        'art_style': settings.art_style,
     }
 
 

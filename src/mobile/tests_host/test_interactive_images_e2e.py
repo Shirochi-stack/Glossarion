@@ -109,7 +109,7 @@ def test_translate_then_build_interactive_images_from_the_images_tab(isolated):
             assert {e["status"] for e in progress["chapters"].values()} == {"completed"}
             for chapter in ipc.translated_chapters(workspace):
                 html = Path(chapter.path).read_text(encoding="utf-8")
-                name = core.image_filename(chapter.number, 1)
+                name = core.image_filename(chapter.position, 1)
                 assert f'src="Interactive_Images/{name}"' in html, chapter.key
                 assert Path(workspace, "Interactive_Images", name).read_bytes() == FAKE_PNG
             assert not [r for r in server.requests[before:] if r.kind == "translation"]

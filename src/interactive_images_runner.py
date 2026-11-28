@@ -522,11 +522,16 @@ def prepare_stylesheet(config, output_dir, log):
 
 def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_event=None,
                            on_progress: Optional[Callable] = None, client_factory=None, recompile=None,
-                           batch: Optional[BatchSettings] = None, glossary_path: Optional[str] = None):
+                           batch: Optional[BatchSettings] = None, glossary_path: Optional[str] = None,
+                           skip_rules: Optional[dict] = None):
     """Run the Interactive Images step on one book's output folder.
 
     ``glossary_path``: the glossary translation uses for this book (``core.find_book_glossary(output_dir,
     owner)``, resolved by the caller on its own thread); '' = translation uses none; None = the plain lookup.
+
+    ``skip_rules``: the glossary's skip rules (:func:`interactive_images_progress_core.glossary_skip_rules` of the
+    owner / settings; None = from ``config``): chapters glossary extraction skips (special files, image-only,
+    empty and, when the glossary skips them, title/header-only chapters) are never planned or drawn.
 
     ``batch``: the translation's batch settings (:func:`batch_settings_from_owner`); None or Batch Translation off
     (or batch size 1) = one request at a time. On, up to ``batch.workers`` chapters run at once and a chapter's image
@@ -581,13 +586,19 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
     count_tokens = _token_counter(text_model)
     budget = _planner_budget(config, settings)
 
-    model = ipc.open_progress(output_dir)
+    rules = skip_rules if skip_rules is not None else ipc.glossary_skip_rules(config)
+    model = ipc.open_progress(output_dir, rules)
     chapters = model.chapters
+    skipped_here = [chapter for chapter in chapters if chapter.skip_reason and ipc.translation_completed(chapter)
+                    and (keys is None or chapter.key in {os.path.basename(str(key)) for key in keys})]
     if keys is None:
         wanted = set(ipc.pending_keys(model))
     else:
         wanted = {os.path.basename(str(key)) for key in keys}
     work = [chapter for chapter in chapters if chapter.key in wanted]
+    if keys is None:
+        for chapter in skipped_here:
+            log(f"⏭️ Interactive Images {chapter.key} skipped: {chapter.skip_reason}")
     log(f"🖼 Interactive Images: {len(work)} chapter(s), {settings.per_chapter} image(s) per chapter, "
         f"text model {text_model}" + (f", image model {image_model} ({choice.source})" if wants_images else ''))
 
@@ -607,6 +618,13 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
         """One chapter, start to finish; a failure stays this chapter's. True when the run was stopped."""
         with result_lock:
             result.processed += 1
+        if chapter.skip_reason:
+            # what glossary extraction skips: no planner request, no entry (the chapter is not listed)
+            chapter_log(f"⏭️ Interactive Images {chapter.key} skipped: {chapter.skip_reason}")
+            with result_lock:
+                result.skipped += 1
+            _notify(on_progress, chapter.key, 'skipped', notify_lock)
+            return False
         if not ipc.translation_completed(chapter):
             ipc.set_status(path, chapter.key, 'skipped', f"translation status is {chapter.status or 'unknown'}")
             with result_lock:
@@ -676,7 +694,7 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
         result.changed_files.sort(key=lambda key: order.get(key, 0))
 
     try:
-        result.images = ipc.image_stats(ipc.open_progress(output_dir)).get('images', 0)
+        result.images = ipc.image_stats(ipc.open_progress(output_dir, rules)).get('images', 0)
     except Exception:
         pass
     log(f"🖼 Interactive Images done: {result.completed} built, {result.failed} failed, {result.rejected} rejected, "
@@ -788,11 +806,13 @@ def _run_chapter(config, settings, output_dir, path, chapter, clients, dispatche
             record['scene'] = scene
             picked = core.select_references(refs, scene, max_refs)
             record['refs'] = [rel for _name, rel in picked]
-            ratio = core.pick_aspect_ratio(settings, chapter.number, k)
+            ratio = core.pick_aspect_ratio(settings, chapter.position, k)
             record['aspect_ratio'] = ratio
             user_text = core.fill_placeholders(settings.image_prompt, {
                 'scene_prompt': item.prompt,
                 'characters': ', '.join(core.format_character(name, genders.get(name), settings) for name in scene),
+                'art_style': settings.art_style,
+                'glossary_entries': core.relevant_glossary_entries_text(entries, scene, item.prompt, settings),
                 'reference_list': core.reference_list_text(picked, settings.reference_line,
                                                            core.placeholder_text(settings, 'style_reference')),
             }, core.LINE_DROP_PLACEHOLDERS)
@@ -810,13 +830,13 @@ def _run_chapter(config, settings, output_dir, path, chapter, clients, dispatche
                     return _image_bytes_from_response(image_client, reply)
 
             data, ext = probe.run(request) if probe is not None else request()
-            name = core.image_filename(chapter.number, k, ext)
+            name = core.image_filename(chapter.position, k, ext)
             target = os.path.join(folder, name)
             tmp = target + '.tmp'
             with open(tmp, 'wb') as handle:
                 handle.write(data)
             os.replace(tmp, target)
-            for other in core.chapter_images_on_disk(output_dir, chapter.number):
+            for other in core.chapter_images_on_disk(output_dir, chapter.position):
                 if other != name and other.rsplit('.', 1)[0] == name.rsplit('.', 1)[0]:
                     _remove(os.path.join(folder, other))  # same k, older extension
             record.update(file=name, status='completed')
@@ -863,7 +883,7 @@ def _run_chapter(config, settings, output_dir, path, chapter, clients, dispatche
         log(f"❌ {chapter.key}: no image was generated; the chapter is unchanged")
         return 'failed'
     # images of an earlier run that this run does not have any more
-    for other in core.chapter_images_on_disk(output_dir, chapter.number):
+    for other in core.chapter_images_on_disk(output_dir, chapter.position):
         if other not in kept_files:
             _remove(os.path.join(folder, other))
     if placed_images and done < len(placed_images):
@@ -893,7 +913,7 @@ def _run_chapter(config, settings, output_dir, path, chapter, clients, dispatche
 
 def _entry(chapter, status, html, text_model, image_model, images, classes, error):
     return {
-        'chapter': chapter.number,
+        'chapter': chapter.position,
         'status': status,
         'source_hash': core.visible_text_hash(html),
         'built_at': ipc.now_iso(),
@@ -996,7 +1016,7 @@ def run_after_translation(owner, completed):
             seen.add(key)
             results.append(run_interactive_images(
                 config, folder, log=log, stop_event=_OwnerStop(owner), recompile=owner_recompiler(owner),
-                batch=batch_settings_from_owner(owner)))
+                batch=batch_settings_from_owner(owner), skip_rules=ipc.glossary_skip_rules(config, owner)))
         return results
     except Exception as exc:
         log(f"⚠️ Interactive Images after translation failed: {exc}")
