@@ -1569,6 +1569,18 @@ def _image_reference_basename(src: str) -> str:
     return os.path.basename(path.replace("\\", "/"))
 
 
+def _interactive_image_on_disk(folder: str, src: str) -> bool:
+    """An Interactive Images ``src`` (interactive_images_core) whose file exists under ``folder``."""
+    try:
+        from interactive_images_core import is_interactive_image_src
+        if not is_interactive_image_src(src):
+            return False
+        path = unquote(urlsplit(str(src or "")).path).replace("\\", "/").lstrip("/")
+    except Exception:
+        return False
+    return os.path.isfile(os.path.join(folder, *path.split("/")))
+
+
 def _legacy_page_image_reference(filename: str):
     match = re.fullmatch(
         r"page_(\d+)_img_(\d+)\.[a-z0-9]+",
@@ -1652,10 +1664,15 @@ def _repair_pdf_image_references(
 
     soups = [BeautifulSoup(content or "", "html.parser") for content in contents]
     referenced_nodes = []
+    interactive_present = 0
     for soup in soups:
         for node in soup.find_all("img"):
             src = str(node.get("src") or "").strip()
             if not src or src.startswith(("data:", "http://", "https://")):
+                continue
+            if _interactive_image_on_disk(folder, src):
+                # Interactive_Images/Glossarion_* (added after translation) render from their own folder
+                interactive_present += 1
                 continue
             referenced_nodes.append((node, src, _image_reference_basename(src)))
 
@@ -1757,7 +1774,7 @@ def _repair_pdf_image_references(
 
     _log(
         log_callback,
-        f"🖼️ PDF image preflight complete: {len(already_present)} already valid, "
+        f"🖼️ PDF image preflight complete: {len(already_present) + interactive_present} already valid, "
         f"{repaired} reference(s) repaired, {len(unresolved)} unresolved",
     )
     if unresolved:

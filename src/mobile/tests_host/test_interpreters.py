@@ -1024,7 +1024,19 @@ def test_nothing_a_scan_worker_reaches_changes_in_a_child():
         reached.add(name)
         stack.extend({node.id for node in ast.walk(functions[name]) if isinstance(node, ast.Name)})
     assert len(reached) > 40
-    allowed_imports = {"re", "os", "hashlib", "difflib", "traceback", "bs4"}
+    # interactive_images_core: the scan skips Glossarion's own illustrations (is_interactive_image_src). It is
+    # pure Python and loads only the standard library and pure-Python Glossarion modules (checked below).
+    allowed_imports = {"re", "os", "hashlib", "difflib", "traceback", "bs4", "interactive_images_core"}
+    pure = {"copy", "difflib", "hashlib", "json", "math", "os", "re", "shutil", "dataclasses", "typing", "base64",
+            "tempfile", "__future__"}
+    chain = ("interactive_images_core", "interactive_css_presets", "prompt_profiles", "prompt_defaults")
+    for module in chain:
+        module_tree = ast.parse((SRC_DIR / f"{module}.py").read_text(encoding="utf-8-sig"))
+        for node in module_tree.body:
+            names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                     else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+            for imported in names:
+                assert imported.split(".")[0] in pure | set(chain), f"{module} imports {imported} at load"
     for name in sorted(reached):
         for node in ast.walk(functions[name]):
             if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "BeautifulSoup":

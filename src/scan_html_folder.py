@@ -2102,7 +2102,9 @@ def detect_missing_images(
         
         # Parse translated HTML
         soup_trans = BeautifulSoup(translated_html, 'html.parser')
-        trans_images = soup_trans.find_all('img')
+        # Interactive Images (Interactive_Images/Glossarion_*) are added after translation: not counted
+        from interactive_images_core import is_interactive_image_src
+        trans_images = [img for img in soup_trans.find_all('img') if not is_interactive_image_src(img.get('src', ''))]
         trans_img_count = len(trans_images)
         
         details = []
@@ -7963,7 +7965,10 @@ def _html_preservation_profile(html_content, image_rename_map=None):
 
     image_srcs = Counter()
     normalized_map = _normalized_image_rename_map(image_rename_map)
+    from interactive_images_core import is_interactive_image_src
     for image in soup.find_all('img'):
+        if is_interactive_image_src(image.get('src', '')):
+            continue  # Interactive Images are added after translation
         src = _normalize_preserved_reference(
             image.get('src', ''),
             normalized_map,

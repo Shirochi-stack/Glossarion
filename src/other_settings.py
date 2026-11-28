@@ -8645,6 +8645,13 @@ def _create_prompt_management_section(self, parent):
     css_row_h.addStretch()
     section_v.addWidget(css_row)
 
+    # Interactive styles + Interactive Images (their own stylesheet: Clear here never touches the Attach CSS file)
+    try:
+        from interactive_images_gui import add_interactive_styles_rows
+        add_interactive_styles_rows(self, section_v, parent)
+    except Exception as e:
+        print(f"⚠️ Interactive styles rows unavailable: {e}")
+
     def _on_load_css_clicked():
         try:
             start_dir = _os.path.dirname(self.epub_css_override_path_var) if getattr(self, 'epub_css_override_path_var', '') else _os.getcwd()

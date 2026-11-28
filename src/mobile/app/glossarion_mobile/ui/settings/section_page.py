@@ -69,7 +69,10 @@ STATIC_LINKS: dict = {
     # Output MD / Output TXT (Sidecars): the desktop "Generate MD" / "Generate TXT" retroactive buttons;
     # Validate EPUB Structure / Rename Files (retain source extension) / Load Font: Tools › Converter
     "epub_output": (("Generate MD / TXT for existing outputs…", "DESCRIPTION", "tools.convert"),
-                    ("Validate EPUB · Rename files · Load font…", "BUILD_OUTLINED", "tools.convert")),
+                    ("Validate EPUB · Rename files · Load font…", "BUILD_OUTLINED", "tools.convert"),
+                    # the desktop "🖼 Interactive Images…" / "🎨 Styles & Preview…" buttons
+                    ("Interactive Images: profiles, references, styles & preview…", "IMAGE",
+                     "tools.interactive-images")),
     # Convert <br> tags to <p>: the desktop "Apply to Existing Outputs" button
     "other.processing.extraction": (("Apply <br> → <p> to existing outputs…", "FORMAT_PARAGRAPH", "tools.convert"),),
     # Meta Data: Translate Headers Now / Delete Header Files / Delete TOC Files (Tools › Headers & metadata)

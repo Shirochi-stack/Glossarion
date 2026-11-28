@@ -75,6 +75,38 @@ Recent translations to summarize:
         """
 
 
+# ---- Interactive Images (interactive_images_core profiles; DRAFT wording, pending the owner's approval) ----
+# The planner reply's JSON shape is part of the prompt (the user can edit it); Glossarion fills only the
+# {placeholders} and adds nothing else to the request. {image_subjects} is a line of its own that is removed
+# when its text is empty (the default Characters mode), so the default request reads as before.
+DEFAULT_INTERACTIVE_IMAGES_PLANNER_PROMPT = """You choose where illustrations go in a translated novel chapter.
+The chapter is below as numbered paragraphs, one per line: [n] text.
+Pick up to {images_per_chapter} moments worth illustrating.
+{image_subjects}
+Characters in this book:
+{character_names}
+Style classes you may assign to paragraphs:
+{css_classes}
+Reply with JSON only, in this shape:
+{"images":[{"after_paragraph":n,"quote":"first words of paragraph n","characters":["name"],"prompt":"what the picture shows"}],"classes":[{"paragraph":n,"quote":"first words of paragraph n","class":"class name"}]}
+Use names from the character list. Do not rewrite the chapter.
+
+Chapter: {chapter_title}
+{paragraphs}"""
+
+DEFAULT_INTERACTIVE_IMAGES_IMAGE_SYSTEM_PROMPT = ""
+
+DEFAULT_INTERACTIVE_IMAGES_IMAGE_PROMPT = """{scene_prompt}
+Characters: {characters}
+{reference_list}"""
+
+DEFAULT_INTERACTIVE_IMAGES_CSS_PROMPT = """Write a CSS stylesheet for an EPUB novel: {user_request}
+Style these classes: {css_classes}
+CSS only: no JavaScript, no @import, no external URLs.
+Every selector starts with .glx-book or a .glx- class; @keyframes names start with glx-.
+Reply with the stylesheet in one css code block."""
+
+
 # ---- {split_marker_instruction} (request merging) ----
 SPLIT_MARKER_PLACEHOLDER = "{split_marker_instruction}"
 SPLIT_MARKER_INSTRUCTION = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."

@@ -96,7 +96,7 @@ _PATTERNS: dict[str, str] = {
     "root": r"output|library|inbox|chats|payloads|logs|[0-9a-fA-F]{12}",
     "pool": "|".join(KEY_POOLS),
     "shelf": r"progress|completed",
-    "book_tab": r"overview|chapters|glossary|output",
+    "book_tab": r"overview|chapters|glossary|output|images",
     "reader_mode": r"translated|original|bilingual",
     "glossary_tab": r"editor|general|balanced|minimal|refinement",
 }
@@ -145,6 +145,7 @@ _TOOLS = (
     # slug, title, milestone, query
     ("progress", "Progress manager", "U5"),
     ("progress/glossary", "Glossary progress", "U5"),
+    ("progress/images", "Interactive Images progress", "U10"),
     ("qa", "QA scanner", "U6"),
     ("glossary-names", "Glossary name mismatches", "U6"),
     ("convert", "Compile EPUB / PDF", "U6"),
@@ -154,6 +155,7 @@ _TOOLS = (
     ("sdlxliff", "SDLXLIFF reviewer", "U7"),
     ("manga", "Manga translator", "U8"),
     ("rpgmaker", "RPG Maker", "U7"),
+    ("interactive-images", "Interactive Images", "U10"),
 )
 
 ROUTES: tuple[RouteSpec, ...] = (

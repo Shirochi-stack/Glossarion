@@ -77,6 +77,8 @@ KIND_MODULES = {
     # U9 (Tools › Converter: the desktop Other Settings retroactive actions)
     "md_txt_sidecars": "compile",
     "br_to_paragraphs": "compile",
+    # Interactive Images (Book page › Images, Tools › Interactive Images; interactive_images_runner)
+    "interactive_images": "interactive_images",
 }
 
 

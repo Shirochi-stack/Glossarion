@@ -6428,6 +6428,46 @@ _LONG_DECODE_SCHEMA = {'src/settings_schema_data.py': [("     'var_names': ('fuz
 # gemini_policy.new_gemini_api_client, pinned to the v1beta Developer API version
 _GENAI3_BATCH_CLIENT = [('\n                client = genai.Client(api_key=api_key)\n', '\n                from gemini_policy import new_gemini_api_client\n                client = new_gemini_api_client(api_key, genai)\n'), ('\n            client = genai.Client(api_key=api_key)\n', '\n            from gemini_policy import new_gemini_api_client\n            client = new_gemini_api_client(api_key, genai)\n')]
 
+# 2026-11-27 Interactive Images: the QA image counts leave Glossarion's own images (Interactive_Images/Glossarion_*) out
+_INTERACTIVE_IMAGES_SCANNER = [
+ (
+  (
+   "        soup_trans = BeautifulSoup(translated_html, 'html.parser')\n"
+   "        trans_images = soup_trans.find_all('img')\n"
+   '        trans_img_count = len(trans_images)\n'
+  ),
+  (
+   "        soup_trans = BeautifulSoup(translated_html, 'html.parser')\n"
+   '        # Interactive Images (Interactive_Images/Glossarion_*) are added after translation: not counted\n'
+   '        from interactive_images_core import is_interactive_image_src\n'
+   "        trans_images = [img for img in soup_trans.find_all('img') if not is_interactive_image_src(img.get('src', ''))]\n"
+   '        trans_img_count = len(trans_images)\n'
+  ),
+ ),
+ (
+  (
+   '    normalized_map = _normalized_image_rename_map(image_rename_map)\n'
+   "    for image in soup.find_all('img'):\n"
+  ),
+  (
+   '    normalized_map = _normalized_image_rename_map(image_rename_map)\n'
+   '    from interactive_images_core import is_interactive_image_src\n'
+   "    for image in soup.find_all('img'):\n"
+  ),
+ ),
+ (
+  (
+   "    for image in soup.find_all('img'):\n"
+   '        src = _normalize_preserved_reference(\n'
+  ),
+  (
+   "    for image in soup.find_all('img'):\n"
+   "        if is_interactive_image_src(image.get('src', '')):\n"
+   '            continue  # Interactive Images are added after translation\n'
+   '        src = _normalize_preserved_reference(\n'
+  ),
+ ),
+]
 
 APPROVED = (
     {
@@ -8200,6 +8240,16 @@ APPROVED = (
                 "through gemini_policy.new_gemini_api_client",
         "source": {
             "src/async_api_processor.py": _GENAI3_BATCH_CLIENT,
+        },
+        "values": {},
+    },
+    {
+        "date": "2026-11-27",
+        "what": "QA scanner: the images Interactive Images adds after translation (Interactive_Images/"
+                "Glossarion_*) are not counted as extra images in the missing-image check or the "
+                "preservation profile's image sources",
+        "source": {
+            "src/scan_html_folder.py": _INTERACTIVE_IMAGES_SCANNER,
         },
         "values": {},
     },

@@ -143,9 +143,20 @@ class ConverterScreen(Screen):
             ft.Text("EPUB Layout:", weight=ft.FontWeight.W_600), self.layout,
             hint_text("Auto keeps the source EPUB's folder layout; EPUB2 forces OEBPS/Text/; EPUB3 a flat OEBPS/."),
             ft.Text("CSS override", weight=ft.FontWeight.W_600), self.css_text, css_row,
+            # desktop Other Settings > EPUB > Chapter styles: Interactive styles under Attach CSS / Load CSS
+            *self._interactive_styles(),
             ft.Text("Custom fonts", weight=ft.FontWeight.W_600), self.fonts_text, fonts_row,
             *tiles, *image_tiles, links,
         ], icon="TUNE", key="cv-options", subtitle="Saved to config.json; used by the next compile.")
+
+    def _interactive_styles(self) -> list:
+        try:
+            from glossarion_mobile.ui.tools.interactive_images import interactive_styles_controls
+
+            return interactive_styles_controls(self.ctx, key="cv-ix")
+        except Exception:  # a build without the Interactive Images modules
+            log.debug("interactive styles unavailable", exc_info=True)
+            return []
 
     def _render_target(self) -> None:
         target = self.target

@@ -57,8 +57,16 @@ __all__ = [
     "GP_GROUPS",
     "GlossaryRowVM",
     "GlossaryView",
+    "IMAGES_KIND",
     "ImageFolderView",
     "ImageItemVM",
+    "ImagesRowVM",
+    "ImagesView",
+    "images_action_reason",
+    "images_signature",
+    "images_spec",
+    "load_images_view",
+    "run_images_action",
     "NO_WORKSPACE",
     "PM_GROUP_ORDER",
     "ProgressView",
@@ -1365,3 +1373,165 @@ def filter_rows(rows: Iterable[Any], status_filter: Optional[str], groups: Mappi
         return list(rows)
     members = tuple(groups.get(status_filter, (status_filter,)))
     return [r for r in rows if r.status in members]
+
+
+# ---------------------------------------------------------------------------
+# Interactive Images (the Progress Manager's third tab; interactive_images_progress_core)
+# ---------------------------------------------------------------------------
+
+#: interactive_images_progress_core statuses -> the app's status palette keys (``tokens.STATUS_PALETTE``).
+IMAGES_PALETTE_KEY = {
+    "completed": "completed", "css_only": "merged", "partial": "in_progress", "failed": "failed",
+    "rejected": "failed", "skipped": "skipped", "in_progress": "in_progress", "pending": "pending",
+    "stale": "in_progress", "not_built": "not_translated",
+}
+IMAGES_KIND = "interactive_images"
+IMAGES_NO_WORKSPACE = "This book has no output workspace yet; translate it first"
+IMAGES_EMPTY = "No translated chapters yet. Interactive Images works on a book's translated chapters."
+
+
+@dataclass(frozen=True)
+class ImagesRowVM:
+    key: str
+    status: str
+    icon: str
+    label: str
+    title: str
+    subtitle: str = ""
+    images: int = 0
+    stale: bool = False
+    error: str = ""
+    palette: str = "pending"
+    raw: Any = None  # interactive_images_progress_core.ImagesRow
+
+
+@dataclass(frozen=True)
+class ImagesView:
+    output_dir: str = ""
+    rows: tuple = ()
+    chips: tuple = ()
+    total_text: str = ""
+    tab_count: str = ""
+    signature: Any = None
+    error: Optional[str] = None
+    empty: bool = False
+    groups: Mapping[str, tuple] = field(default_factory=dict)
+    state: Any = None  # interactive_images_progress_core.ImagesModel
+
+
+def _images_core(service: Any) -> Any:
+    ipc = service.core.module("interactive_images_progress_core")
+    if ipc is None or not hasattr(ipc, "open_progress"):
+        raise CoreMissing("interactive_images_progress_core")
+    return ipc
+
+
+def _images_row_vm(ipc: Any, row: Any) -> ImagesRowVM:
+    label = ipc.STATUS_LABELS.get(row.status, row.status)
+    count = f"{row.images} image{'s' if row.images != 1 else ''}" if row.images else "no images"
+    title = os.path.splitext(row.key)[0]
+    subtitle = " · ".join(part for part in (count, row.error) if part)
+    return ImagesRowVM(key=row.key, status=row.status, icon=row.icon, label=label, title=title, subtitle=subtitle,
+                       images=int(row.images or 0), stale=bool(row.stale), error=str(row.error or ""),
+                       palette=IMAGES_PALETTE_KEY.get(row.status, "pending"), raw=row)
+
+
+def _images_chips(ipc: Any, stats: Mapping[str, Any]) -> tuple:
+    chips = []
+    for group, text, _colour in ipc.STAT_CHIPS:
+        emoji, _sep, label = text.partition(" ")
+        members = ipc.STATUS_GROUPS.get(group, (group,))
+        chips.append(StatChip(group, emoji, label, int(stats.get(group, 0) or 0),
+                              IMAGES_PALETTE_KEY.get(members[0], "pending"),
+                              pinned=group in ("built", "not_built")))
+    return tuple(chips)
+
+
+def images_signature(service: Any, book: Mapping[str, Any]) -> Any:
+    """Blocking (the Book page's 2 s poll): the images progress file + the translation progress file
+    (``interactive_images_progress_core.book_signature``); None without a workspace."""
+    folder = book_workspace(service, book)
+    if not folder:
+        return None
+    try:
+        return _images_core(service).book_signature(folder)
+    except CoreMissing:
+        return None
+
+
+def load_images_view(service: Any, book: Mapping[str, Any], *, previous: Optional[ImagesView] = None) -> ImagesView:
+    """Blocking: the Images tab model (rows, stats, staleness) over ``interactive_images_progress_core``."""
+    try:
+        ipc = _images_core(service)
+    except CoreMissing:
+        return ImagesView(error="Interactive Images is not available in this build", empty=True)
+    groups = {str(k): tuple(v) for k, v in ipc.STATUS_GROUPS.items()}
+    folder = book_workspace(service, book)
+    if not folder or not os.path.isdir(folder):
+        return ImagesView(error=IMAGES_NO_WORKSPACE, empty=True, groups=groups)
+    model = previous.state if previous is not None and previous.state is not None \
+        and _same_folder(previous.output_dir, folder) else None
+    if model is None:
+        model = ipc.open_progress(folder)
+    else:
+        ipc.reload_progress(model)
+    rows = ipc.image_rows(model)
+    stats = ipc.image_stats(model, rows)
+    return ImagesView(
+        output_dir=folder,
+        rows=tuple(_images_row_vm(ipc, row) for row in rows),
+        chips=_images_chips(ipc, stats),
+        total_text=f"Total: {stats.get('total', 0)} · Images: {stats.get('images', 0)}",
+        tab_count=ipc.tab_count_text(stats),
+        signature=ipc.book_signature(folder),
+        empty=not rows,
+        groups=groups,
+        state=model,
+    )
+
+
+def images_action_reason(service: Any, view: Optional[ImagesView], action: str, rows: Sequence[ImagesRowVM], *,
+                         running: bool = False) -> Optional[str]:
+    """Why an Images tab action cannot run (the shared ``action_reason`` rules + this app's state)."""
+    if view is None or not view.output_dir:
+        return view.error if view is not None and view.error else IMAGES_NO_WORKSPACE
+    try:
+        ipc = _images_core(service)
+    except CoreMissing:
+        return "Interactive Images is not available in this build"
+    if action in ("build", "retry") and not service.has_job_kind(IMAGES_KIND):
+        return "The job service is not running"
+    return ipc.action_reason(action, [r.raw for r in rows], running=running)
+
+
+def run_images_action(service: Any, view: ImagesView, action: str, rows: Sequence[ImagesRowVM]) -> Any:
+    """Blocking: Mark for rebuild / Delete images (writes), Show plan / Open (reads). ``build`` / ``retry`` are
+    jobs (``images_spec``)."""
+    ipc = _images_core(service)
+    targets = ipc.action_targets(action, [r.raw for r in rows])
+    folder = view.output_dir
+    if action == "mark":
+        return ipc.mark_for_rerun(ipc.core.progress_path(folder), targets)
+    if action == "delete":
+        return ipc.delete_entries(folder, targets)
+    if action == "show_plan":
+        return "\n\n".join(f"── {row.key} ──\n{ipc.plan_text(row)}" for row in targets)
+    if action in ("open_images", "open_chapter", "open_folder"):
+        if action == "open_folder":
+            return ipc.core.interactive_dir(folder)
+        return [ipc.open_targets(folder, row) for row in targets]
+    raise ValueError(action)
+
+
+def images_spec(service: Any, book: Mapping[str, Any], keys: Optional[Sequence[str]] = None) -> Any:
+    """The ``interactive_images`` job for a book (``keys``: output file names; None = every chapter that needs
+    a build, like the desktop "Build pending")."""
+    from glossarion_mobile.services.jobs import JobSpec
+
+    folder = book_workspace(service, book)
+    params: dict = {}
+    if keys is not None:
+        params["keys"] = [str(k) for k in keys]
+    title = str(book.get("name") or os.path.basename(os.path.normpath(folder)) or "Book")
+    return JobSpec(kind=IMAGES_KIND, title=title, inputs=(folder,), params=params,
+                   origin=service.origin_for(book) if hasattr(service, "origin_for") else {})
