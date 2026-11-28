@@ -194,7 +194,9 @@ from glossary_progress_core import (  # noqa: F401 -- moved in U5; re-exported f
     _normalize_glossary_refinement_selection,
     _parallel_glossary_progress_filename_aliases,
     finish_manual_glossary_refinement,
+    glossary_progress_legend_stats,
     glossary_progress_locator,
+    glossary_progress_signature,
     make_glossary_progress_model,
     prepare_manual_glossary_refinement,
     run_manual_glossary_refinement,
@@ -8155,6 +8157,8 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         dialog._pm_tab_callbacks = {}
         dialog._pm_tab_factories = {}
         dialog._pm_notebook = _DropdownNotebook(dialog)
+        dialog._pm_glossary_counts = {}
+        dialog._pm_glossary_count_providers = {}
 
         def _update_nav():
             idx = combo.currentIndex()
@@ -8204,6 +8208,43 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 return
             _set_tab_count('translation', f"{done}/{total}" if total else None)
 
+        def _update_glossary_count():
+            """Glossary tab label: completed/total of the CURRENT file, the numbers its
+            panel's legend shows ("Completed" / "Total"). Once the panel is built it
+            reports them itself; before that the file's count provider computes them
+            from the progress file with the panel's own model."""
+            if 'glossary' not in pages:
+                return
+            key = _current_file()
+            if key is None or not (len(dialog._pm_files) == 1 or str(key).lower().endswith('.epub')):
+                _set_tab_count('glossary')
+                return
+            provider = dialog._pm_glossary_count_providers.get(_pm_file_key(key))
+            stats = None
+            if callable(provider):
+                try:
+                    stats = provider()  # None: this file has no glossary progress
+                except Exception as exc:
+                    print(f"\u26a0\ufe0f Glossary tab count failed: {exc}")
+                    stats = None
+            if stats is not None:
+                reported = dialog._pm_glossary_counts.get(_pm_file_key(key))
+                if isinstance(reported, dict):
+                    stats = reported  # the built panel's live legend
+            total = stats.get('total', 0) if isinstance(stats, dict) else 0
+            done = stats.get('completed', 0) if isinstance(stats, dict) else 0
+            _set_tab_count('glossary', f"{done}/{total}" if total else None)
+
+        def _set_glossary_count(key, stats):
+            """A file's built glossary panel reports its legend numbers (on every change)."""
+            dialog._pm_glossary_counts[_pm_file_key(key)] = dict(stats) if isinstance(stats, dict) else None
+            current = _current_file()
+            if current is not None and _pm_file_key(current) == _pm_file_key(key):
+                _update_glossary_count()
+
+        def _update_tab_counts():
+            _update_translation_count()
+            _update_glossary_count()
         def _notify_tab(name, shown):
             callbacks = dialog._pm_tab_callbacks.get(name)
             if not callbacks:
@@ -8273,7 +8314,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             populate_current = getattr(dialog, '_populate_current_progress_tab', None)
             if callable(populate_current) and _current_tab_name() == 'translation':
                 QTimer.singleShot(0, populate_current)
-            _update_translation_count()
+            _update_tab_counts()
 
         combo.currentIndexChanged.connect(_on_file_changed)
 
@@ -8294,7 +8335,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                     QTimer.singleShot(0, refresher)
             if current and dialog.isVisible():
                 _notify_tab(current, True)
-            _update_translation_count()
+            _update_tab_counts()
 
         state['tab'] = _current_tab_name()
         tabs.currentChanged.connect(_on_tab_changed)
@@ -8304,7 +8345,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             if current:
                 _notify_tab(current, visible)
             if visible:
-                _update_translation_count()
+                _update_tab_counts()
 
         visibility_filter = _ProgressWindowEventFilter(_on_visibility, dialog)
         dialog.installEventFilter(visibility_filter)
@@ -8337,10 +8378,14 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 if dialog.isVisible():
                     _notify_tab(name, True)
 
-        def _register_glossary(key, builder, page_factory):
+        def _register_glossary(key, builder, page_factory, count_provider=None):
             """A file's page registers its own glossary panel builder (its own output
-            folder, progress data and locator) and the shared Glossary page factory."""
+            folder, progress data and locator), the shared Glossary page factory and the
+            provider of the file's legend numbers for the tab label (before its panel
+            is built)."""
             dialog._gp_panel_builders[_pm_file_key(key)] = builder
+            if callable(count_provider):
+                dialog._pm_glossary_count_providers[_pm_file_key(key)] = count_provider
             _register_tab_factory('glossary', page_factory)
             added = getattr(dialog, '_pm_glossary_builder_added', None)
             if callable(added):
@@ -8373,6 +8418,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         dialog._pm_set_tab_count = _set_tab_count
         dialog._pm_update_nav = _update_nav
         dialog._pm_update_translation_count = _update_translation_count
+        dialog._pm_update_glossary_count = _update_glossary_count
+        dialog._pm_set_glossary_count = _set_glossary_count
+        dialog._pm_update_tab_counts = _update_tab_counts
         dialog._pm_register_tab_factory = _register_tab_factory
         dialog._pm_register_glossary = _register_glossary
         if 'glossary' in pages:
@@ -8382,7 +8430,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
 
         count_timer = QTimer(dialog)
         count_timer.setInterval(3000)
-        count_timer.timeout.connect(lambda: dialog.isVisible() and _update_translation_count())
+        count_timer.timeout.connect(lambda: dialog.isVisible() and _update_tab_counts())
         count_timer.start()
         dialog._pm_count_timer = count_timer
 
@@ -10326,6 +10374,19 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 execution_plan,
             )
         
+        def _gp_model_kwargs():
+            """The make_glossary_progress_model arguments of this file's glossary panel
+            (also used for the Glossary tab's pre-build count)."""
+            return dict(
+                glossary_progress_source_path=glossary_progress_source_path,
+                glossary_progress_source_filenames=glossary_progress_source_filenames,
+                output_dir=output_dir,
+                prog=prog,
+                find_gp_for_file=_find_gp_for_file,
+                glossary_refinement_expected_entries=_glossary_refinement_expected_entries,
+                refinement_type_key=_refinement_type_key,
+            )
+
         def _build_gp_panel(fp, gp_path, parent_widget, pump_loading=None):
             """Build a glossary progress panel for a single EPUB. Returns (panel_widget, refresh_func)."""
             from PySide6.QtWidgets import QStackedWidget, QComboBox
@@ -10335,14 +10396,8 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 fp,
                 gp_path,
                 pump_loading=pump_loading,
-                glossary_progress_source_path=glossary_progress_source_path,
-                glossary_progress_source_filenames=glossary_progress_source_filenames,
-                output_dir=output_dir,
-                prog=prog,
-                find_gp_for_file=_find_gp_for_file,
-                glossary_refinement_expected_entries=_glossary_refinement_expected_entries,
-                refinement_type_key=_refinement_type_key,
                 current_gp_data=lambda: gp_data,
+                **_gp_model_kwargs(),
             )
             _pump_loading_frame = _gp_model._pump_loading_frame
             _gp_load_progress_dict = _gp_model._gp_load_progress_dict
@@ -10411,6 +10466,19 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             _gp_collect_footnotes = _gp_model._gp_collect_footnotes
             _find_glossary_file = _gp_model._find_glossary_file
             _gp_apply_remove_from_progress = _gp_model._gp_apply_remove_from_progress
+
+            def _report_gp_count(stats):
+                # The Progress Manager window's Glossary tab label shows these legend numbers
+                owner_window = (
+                    parent_dialog
+                    if callable(getattr(parent_dialog, '_pm_set_glossary_count', None))
+                    else getattr(dialog, '_pm_glossary_window', None)
+                )
+                if callable(getattr(owner_window, '_pm_set_glossary_count', None)):
+                    try:
+                        owner_window._pm_set_glossary_count(fp, stats)
+                    except RuntimeError:
+                        pass
             
             panel = QWidget(parent_widget)
             p_layout = QVBoxLayout(panel)
@@ -10467,6 +10535,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             n_in_progress = _legend_stats_init['in_progress']
             n_not_refined = _legend_stats_init['not_refined']
             n_refine_failed = _legend_stats_init['refine_failed']
+            _report_gp_count(_legend_stats_init)
             
             gp_stats_frame = QWidget()
             gp_stats_layout = QHBoxLayout(gp_stats_frame)
@@ -10760,6 +10829,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 lbl_gp_not_refined.setVisible(not_refined > 0)
                 lbl_gp_refine_failed.setText(f"💀 Refine Failed: {refine_failed}")
                 lbl_gp_refine_failed.setVisible(refine_failed > 0)
+                _report_gp_count(stats)
 
             # Helper to refresh stats labels from a loaded progress dict
             def _refresh_stats_from_dict(_d):
@@ -12148,6 +12218,22 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 return _build_gp_panel(file_path, gp, parent_widget, pump_loading=pump_loading)
             return _build_gp_empty_panel(file_path, parent_widget)
 
+        _gp_count_cache = {}
+
+        def _gp_count_stats():
+            """This file's legend numbers from its progress file, without building the
+            panel (the panel's own model; cached while the file and the clock hold)."""
+            gp = _find_gp_for_file(file_path)
+            if not gp or not os.path.isfile(gp):
+                return None
+            signature = glossary_progress_signature(gp)
+            cached = _gp_count_cache.get(gp)
+            if cached and cached[0] == signature and time.time() - cached[1] < 10:
+                return cached[2]
+            stats = glossary_progress_legend_stats(self, file_path, gp, **_gp_model_kwargs())
+            _gp_count_cache[gp] = (signature, time.time(), stats)
+            return stats
+
         def _show_glossary_progress():
             """Show glossary extraction progress on the Progress Manager's Glossary tab."""
             try:
@@ -12171,7 +12257,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                             os.path.abspath(file_path),
                             os.path.splitext(os.path.basename(file_path))[0] or file_path,
                         )
-                        window._pm_register_glossary(file_path, _build_gp_file_panel, _build_glossary_page)
+                        window._pm_register_glossary(
+                            file_path, _build_gp_file_panel, _build_glossary_page, _gp_count_stats
+                        )
                         dialog._pm_glossary_window = window
                 window._pm_show_tab('glossary')
             except Exception as e:
@@ -12426,7 +12514,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
 
         dialog._show_glossary_progress = _show_glossary_progress
         if callable(getattr(parent_dialog, '_pm_register_glossary', None)):
-            parent_dialog._pm_register_glossary(file_path, _build_gp_file_panel, _build_glossary_page)
+            parent_dialog._pm_register_glossary(
+                file_path, _build_gp_file_panel, _build_glossary_page, _gp_count_stats
+            )
         glossary_progress_btn.clicked.connect(_show_glossary_progress)
         title_layout.addWidget(glossary_progress_btn)
         
@@ -12454,11 +12544,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 gp_results = {fp: _find_gp_for_file(fp) for fp in all_epubs}
                 found_paths = {fp: gp for fp, gp in gp_results.items() if gp}
                 any_exists = bool(found_paths)
-                if callable(getattr(parent_dialog, '_pm_set_tab_count', None)):
-                    # Glossary tab label: how many of the window's books are tracked
-                    parent_dialog._pm_set_tab_count(
-                        'glossary', str(len(found_paths)) if found_paths else None
-                    )
+                if callable(getattr(parent_dialog, '_pm_update_glossary_count', None)):
+                    # Glossary tab label: completed/total of the current file
+                    parent_dialog._pm_update_glossary_count()
                 glossary_progress_btn.setVisible(True)
                 if any_exists:
                     count = len(found_paths)
@@ -12482,7 +12570,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         _gp_vis_timer.start()
         # Parent timer to container so it dies with the dialog
         _gp_vis_timer.setParent(container)
-        if callable(getattr(parent_dialog, '_pm_set_tab_count', None)):
+        if callable(getattr(parent_dialog, '_pm_update_glossary_count', None)):
             # The Glossary tab's count should not wait for the first 3 s tick
             QTimer.singleShot(0, _check_glossary_btn_visibility)
         
