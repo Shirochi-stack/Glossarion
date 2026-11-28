@@ -172,7 +172,16 @@ class _Clients:
         self._config = config
         self._output_dir = output_dir
         self._idle = {'text': [], 'image': []}
+        self._made = {'text': 0, 'image': 0}
         self._lock = threading.Lock()
+
+    def warm(self, kind):
+        """Make the first client of a kind now, so a client that cannot be made fails the chapter before any request
+        (as it always has), not one image at a time."""
+        with self._lock:
+            if not self._made[kind]:
+                self._idle[kind].append(self._factory(kind, self._models[kind], self._config, self._output_dir))
+                self._made[kind] += 1
 
     @contextlib.contextmanager
     def checkout(self, kind):
@@ -180,6 +189,8 @@ class _Clients:
             client = self._idle[kind].pop() if self._idle[kind] else None
         if client is None:
             client = self._factory(kind, self._models[kind], self._config, self._output_dir)
+            with self._lock:
+                self._made[kind] += 1
         try:
             yield client
         finally:
@@ -523,6 +534,9 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
             _notify(on_progress, chapter.key, 'skipped', notify_lock)
             return False
         try:
+            clients.warm('text')
+            if wants_images:
+                clients.warm('image')
             status = _run_chapter(config, settings, output_dir, path, chapter, clients, dispatcher,
                                   text_model, image_model, css_classes, (names, entries, tracker), name_map, refs,
                                   max_refs, count_tokens, budget, stop_event, chapter_log, on_progress, notify_lock,

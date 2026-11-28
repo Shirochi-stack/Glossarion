@@ -377,3 +377,19 @@ def test_the_desktop_start_run_passes_the_translation_batch_fields_read_on_the_g
     assert seen['thread'] == 'interactive-images'
     bridge = owner._interactive_images_bridge
     bridge.deleteLater()
+
+
+@pytest.mark.parametrize('batch', [None, _batch(3)])
+def test_a_client_that_cannot_be_made_fails_the_chapter_before_any_request(tmp_path, batch):
+    out = _book(tmp_path, chapters=2)
+    fleet = Fleet()
+
+    def factory(kind, model, config, output_dir):
+        if kind == 'image':
+            raise RuntimeError("no image key")
+        return fleet.factory(kind, model, config, output_dir)
+
+    logs = []
+    result = runner.run_interactive_images(dict(CONFIG), str(out), log=logs.append, client_factory=factory, batch=batch)
+    assert (result.completed, result.failed) == (0, 2)
+    assert fleet.requests == []          # no planner request was spent on a chapter whose images cannot be made
