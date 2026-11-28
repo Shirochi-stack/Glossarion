@@ -196,7 +196,7 @@ tests/**
 !tests/parity/BASELINE_FAILURES.txt
 !tests/parity/DISCREPANCIES.md
 # Mobile rewrite (U1+): desktop-parity tests for mobile_runtime, the shared GUI-free modules and
-# the backend mobile-compat patches (python-app.yml runs them on Python 3.10).
+# the backend mobile-compat patches (python-app.yml runs them on Python 3.12).
 !tests/test_mobile_runtime.py
 !tests/test_safe_image.py
 !tests/test_cv2_decode_gate.py

@@ -188,17 +188,15 @@ def enable_detailed_http_logging(log_folder="http_requests"):
     requests.request = _patched_request
     requests.Session.request = _patched_session_request
     
-    # Patch httpx if available
-    try:
-        import httpx
-        original_httpx_send = httpx.Client.send
-        
+    # Patch httpx and httpx2 if available (httpx2: openai 3, anthropic 2, mistralai 3 and
+    # google-genai 3 send through httpx2.Client; httpx: our direct calls)
+    def _make_patched_send(original_httpx_send):
         def _patched_httpx_send(self, request, **kwargs):
             # Extract request info
             method = request.method
             url = str(request.url)
             headers = dict(request.headers)
-            
+
             # Get body
             try:
                 if hasattr(request, 'content'):
@@ -212,13 +210,13 @@ def enable_detailed_http_logging(log_folder="http_requests"):
                     body = None
             except:
                 body = None
-            
+
             # Send request
             response = original_httpx_send(self, request, **kwargs)
-            
+
             # Get response
             response_body = _response_body_for_log(response, kwargs.get('stream', False))
-            
+
             _save_http_log(
                 method=method,
                 url=url,
@@ -228,13 +226,21 @@ def enable_detailed_http_logging(log_folder="http_requests"):
                 response_headers=dict(response.headers),
                 response_body=response_body
             )
-            
+
             return response
-        
-        httpx.Client.send = _patched_httpx_send
+        return _patched_httpx_send
+
+    try:
+        import httpx
+        httpx.Client.send = _make_patched_send(httpx.Client.send)
     except:
         pass
-    
+    try:
+        import httpx2
+        httpx2.Client.send = _make_patched_send(httpx2.Client.send)
+    except:
+        pass
+
     _patched = True
     # Only log in main process to avoid duplicate messages from multiprocessing workers
     try:

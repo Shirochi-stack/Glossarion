@@ -8,8 +8,6 @@ Protocol:
   - The config file contains all parameters needed for PDF generation
 """
 
-from safe_image import open_image
-
 import sys
 import os
 import io
@@ -19,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import mobile_runtime
+from safe_image import open_image
 
 # Force UTF-8 encoding for stdout/stderr on Windows (including when piped as subprocess).
 # Skipped where subprocesses are unavailable: there this module runs in-process

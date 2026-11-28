@@ -639,6 +639,7 @@ CHOICES_OVERRIDES = {
                       ("direct", "Direct batching"),
                       ("aggressive", "No batching")),
     "gemini_service_tier": ("off", "standard", "flex", "fast", "priority"),  # gemini_service_tier_combo
+    "gemini_long_decode": (("auto", "Auto"), ("off", "Off"), ("on", "On")),  # gemini_long_decode_combo
     "epub_layout_mode": (("auto", "Auto"), ("epub2", "EPUB2"), ("epub3", "EPUB3")),  # layout_combo / Converter
     "summary_role": ("user", "system", "both"),                            # rolling summary role_combo
     "duplicate_detection_mode": (("basic", "Basic (Fast) - Original 85% threshold, 1000 chars"),

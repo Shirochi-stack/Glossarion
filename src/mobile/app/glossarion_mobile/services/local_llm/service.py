@@ -330,6 +330,10 @@ class _TokenRedactor(logging.Filter):
         return True
 
 
+#: Loggers that print request URLs: httpx and httpx2 (the HTTP client of openai 3+).
+_HTTP_LOGGERS = ("httpx", "httpx2")
+
+
 def _redact_token_in(logger_name: str, token: str) -> None:
     logger = logging.getLogger(logger_name)
     if not any(isinstance(f, _TokenRedactor) and f.token == token for f in logger.filters):
@@ -891,7 +895,9 @@ class LocalEngineService:
 
     def start(self) -> str:
         self.server.start()
-        _redact_token_in("httpx", self.server.token)  # "HTTP Request: POST http://127.0.0.1:<port>/<token>/v1/…"
+        # "HTTP Request: POST http://127.0.0.1:<port>/<token>/v1/…": httpx, and httpx2 (openai 3+)
+        for name in _HTTP_LOGGERS:
+            _redact_token_in(name, self.server.token)
         os.environ[URL_ENV] = self.server.base_url
         set_default_service(self)
         self._recover_gpu_attempt()
@@ -916,9 +922,10 @@ class LocalEngineService:
         self.unload(force=True)
         url = self.server.base_url if self.server.running else None
         self.server.stop()
-        logger = logging.getLogger("httpx")
-        for item in [f for f in logger.filters if isinstance(f, _TokenRedactor) and f.token == self.server.token]:
-            logger.removeFilter(item)
+        for name in _HTTP_LOGGERS:
+            logger = logging.getLogger(name)
+            for item in [f for f in logger.filters if isinstance(f, _TokenRedactor) and f.token == self.server.token]:
+                logger.removeFilter(item)
         if url is not None and os.environ.get(URL_ENV) == url:
             os.environ.pop(URL_ENV, None)
         if _DEFAULT is self:

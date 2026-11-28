@@ -5,7 +5,7 @@ behavior. GitLab does not execute GitHub Actions YAML. `.gitlab-ci.yml` provides
 manual alternatives and the original automatic event triggers:
 
 - A push to `main`, or a merge request targeting `main`, runs the Python
-  application's desktop tests (Python 3.10) and mobile backend check (Python 3.13).
+  application's desktop tests (Python 3.12) and mobile backend check (Python 3.13).
 - A push of a version tag such as `v9.14.5` runs a small readiness job. Creating
   the GitLab release starts the three Linux variants and complete mobile graph,
   then appends verified output to that release. This also works for existing tags.
@@ -110,7 +110,7 @@ this configuration neither purchases capacity nor grants credentials.
 
 | Runner tag | Required environment |
 | --- | --- |
-| `saas-linux-medium-amd64`, desktop tests | Python 3.10 container and the original Cairo/headless Qt packages |
+| `saas-linux-medium-amd64`, desktop tests | Python 3.12 container and the original Cairo/headless Qt packages |
 | `saas-linux-small-amd64`, source/release checks | Python 3.12 container; automatic publisher uses only the standard library |
 | `saas-linux-medium-amd64`, Linux packaging | Python 3.12 container and the original native library list, with Debian's `libasound2` name in place of Ubuntu's `libasound2t64` |
 | `saas-windows-medium-amd64` | uv-provisioned Python 3.12, MSYS2 MINGW64 and the original GTK/Pango/Cairo packages; PowerShell 7.4+ is required by reused shell steps |
@@ -282,7 +282,7 @@ installation prompt and fail with EOF before compiling any application.
 Automatic event selection is checked against the checked-in GitHub trigger
 definitions, including rejection of feature-branch pushes, MRs to other targets,
 non-version tags and schedules. Automatic desktop tests use the existing hosted
-Linux medium runner with the original Python 3.10/headless native prerequisites.
+Linux medium runner with the Python 3.12/headless native prerequisites.
 Desktop packaging and source checks now use the available hosted tags above.
 Native build completion and artifact verification remain runtime evidence, not
 a consequence of static trigger/plan checks.

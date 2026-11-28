@@ -271,8 +271,11 @@ def test_collector_classifies_tier_b_imports_as_pinned(tmp_path):
                  "google-cloud-texttospeech", "google-cloud-vision", "deep-translator", "google-genai",
                  "google-auth", "anthropic"):
         assert third.get(dist, {}).get("status") == "pinned", (dist, third.get(dist))
-    for dist in ("google-cloud-aiplatform", "vertexai", "sentence-transformers", "argostranslate"):
+    for dist in ("sentence-transformers", "argostranslate"):
         assert third.get(dist, {}).get("status") == "unavailable", (dist, third.get(dist))
+    # aiplatform / vertexai: no backend module imports them any more (desktop dropped them too)
+    for dist in ("google-cloud-aiplatform", "vertexai"):
+        assert third.get(dist, {}).get("status") in (None, "unavailable"), (dist, third.get(dist))
     tier_b_errors = [f for f in result.errors if any(n in f.message for n in TIER_B_PINS)]
     assert not tier_b_errors, [f.message for f in tier_b_errors]
     assert "grpc_gemini_client" in set(result.closure)
@@ -349,8 +352,9 @@ def test_unified_api_client_sees_the_tier_b_sdks(uac):
     # _ensure_*: the import-time values on desktop, the first-use import on mobile (deferred, below)
     assert uac._ensure_grpc_gemini() is True and uac.GrpcGeminiClient is not None
     assert uac._ensure_google_translate() is True and uac.google_translate is not None
-    # uv.lock has no aiplatform / vertexai (protobuf<7): the REST path below serves Vertex.
-    assert uac.VERTEX_AI_AVAILABLE is (_has("vertexai") and _has("google.cloud.aiplatform"))
+    # No aiplatform / vertexai anywhere (aiplatform 2.x needs google-genai<3): Vertex runs over
+    # REST through google-genai, so its availability is google-genai's.
+    assert uac.VERTEX_AI_AVAILABLE is uac.GENAI_AVAILABLE
 
 
 _DEFERRED_IMPORT_PROBE = r"""
@@ -661,7 +665,8 @@ def _vertex_env(monkeypatch, isolated, server, uac, *, mobile):
     if mobile:
         monkeypatch.setenv("GLOSSARION_MOBILE", "1")
         monkeypatch.setenv("GLOSSARION_NO_PROCESSES", "1")
-    # google-cloud-aiplatform / vertexai are absent on mobile (protobuf<7): block them everywhere.
+    # google-cloud-aiplatform / vertexai are not installed anywhere (aiplatform 2.x needs
+    # google-genai<3): block them so a stray install cannot hide a dependency on them.
     monkeypatch.setitem(sys.modules, "google.cloud.aiplatform", None)
     monkeypatch.setitem(sys.modules, "vertexai", None)
     # Gemini safety-config payloads go to the test dir, never next to the module.
@@ -671,17 +676,19 @@ def _vertex_env(monkeypatch, isolated, server, uac, *, mobile):
     return sa
 
 
+@pytest.mark.parametrize("mobile", [True, False], ids=["mobile", "desktop"])
 @pytest.mark.parametrize("model, expected", [
     ("vertex/claude-sonnet-4@20250514", "Hello from Vertex Claude"),
     ("vertex/gemini-2.5-flash", "Hello from Vertex Gemini"),
 ])
-def test_vertex_runs_over_rest_without_aiplatform_on_mobile(isolated, uac, monkeypatch, model, expected):
-    """Vertex Model Garden on mobile: no google-cloud-aiplatform, REST + google-auth service-account
-    tokens (Claude through anthropic.AnthropicVertex, Gemini through google-genai vertexai=True)."""
+def test_vertex_runs_over_rest_without_aiplatform(isolated, uac, monkeypatch, model, expected, mobile):
+    """Vertex Model Garden on mobile and desktop: no google-cloud-aiplatform, REST + google-auth
+    service-account tokens (Claude through anthropic.AnthropicVertex, Gemini through google-genai
+    vertexai=True)."""
     pytest.importorskip("google.genai")
     pytest.importorskip("anthropic")
     with _LoopbackHttp(_vertex_answers()) as server:
-        sa = _vertex_env(monkeypatch, isolated, server, uac, mobile=True)
+        sa = _vertex_env(monkeypatch, isolated, server, uac, mobile=mobile)
         client = uac.UnifiedClient(api_key=str(sa), model=model)
         assert client.client_type == "vertex_model_garden"
         response = client._send_vertex_model_garden(
@@ -698,20 +705,6 @@ def test_vertex_runs_over_rest_without_aiplatform_on_mobile(isolated, uac, monke
         assert paths[-1].endswith(f"/projects/demo-project/locations/us-east5/publishers/google/models/"
                                   f"{model_name}:generateContent")
     assert server.calls[-1][1] == "Bearer loopback-token"
-
-
-def test_vertex_without_aiplatform_keeps_the_desktop_error(isolated, uac, monkeypatch):
-    """Desktop is unchanged: without google-cloud-aiplatform the route still fails before any request."""
-    with _LoopbackHttp(_vertex_answers()) as server:
-        sa = _vertex_env(monkeypatch, isolated, server, uac, mobile=False)
-        client = uac.UnifiedClient(api_key=str(sa), model="vertex/claude-sonnet-4@20250514")
-        with pytest.raises(uac.UnifiedClientError) as info:
-            client._send_vertex_model_garden([{"role": "user", "content": "Hi"}], temperature=0.2, max_tokens=64)
-    message = str(info.value)
-    assert "Vertex AI Model Garden error" in message
-    # the import error itself ("google.cloud.aiplatform", or "google.cloud" when no google-cloud-* is installed)
-    assert "aiplatform" in message or "google.cloud" in message, message
-    assert server.calls == []
 
 
 # ============================================================================ device runtime note

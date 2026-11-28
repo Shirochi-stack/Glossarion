@@ -179,12 +179,14 @@ import html
 import builtins as _builtins
 try:
     from gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
-                               omit_gemini_legacy_parameters, gemini_ignores_sampling,
-                               gemini_safety_thresholds, describe_gemini_safety)
+                               gemini_thinking_level, GEMINI_THINKING_LEVELS, omit_gemini_legacy_parameters, gemini_ignores_sampling,
+                               gemini_safety_thresholds, describe_gemini_safety, gemini_long_decode,
+                               new_gemini_api_client as _new_gemini_api_client)
 except ImportError:
     from .gemini_policy import (is_google_prohibited_use_policy_refusal, uses_gemini_thinking_level,
-                                omit_gemini_legacy_parameters, gemini_ignores_sampling,
-                                gemini_safety_thresholds, describe_gemini_safety)
+                                gemini_thinking_level, GEMINI_THINKING_LEVELS, omit_gemini_legacy_parameters, gemini_ignores_sampling,
+                                gemini_safety_thresholds, describe_gemini_safety, gemini_long_decode,
+                                new_gemini_api_client as _new_gemini_api_client)
 try:
     from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
 except ImportError:
@@ -405,30 +407,50 @@ def _api_watchdog_norm_int(val):
         except Exception:
             return None
 
+def _openai_http_module():
+    """The HTTP library whose Client/Limits/Timeout objects ``openai.OpenAI`` takes:
+    httpx2 for openai 3+ (its default client; legacy httpx objects run only through a
+    temporary escape hatch), httpx for older openai releases. None when neither is usable."""
+    if openai is not None and httpx2 is not None and hasattr(openai, 'DefaultHttpx2Client'):
+        return httpx2
+    return httpx
+
+
+def _openai_timeout(*args, **kwargs):
+    """``Timeout`` of the openai SDK's HTTP library (see ``_openai_http_module``), else None."""
+    module = _openai_http_module()
+    if module is None:
+        return None
+    return module.Timeout(*args, **kwargs)
+
+
 def _create_isolated_httpx_client(timeout=None):
-    """Create an httpx.Client with an isolated connection pool.
+    """Create an HTTP client with an isolated connection pool for ``openai.OpenAI``.
 
     Every ``openai.OpenAI()`` instance that does *not* receive an explicit
-    ``http_client`` will share httpx's process-wide default connection pool.
+    ``http_client`` will share the process-wide default connection pool.
     When *any* of those clients is garbage-collected or explicitly closed, the
     shared pool's sockets are torn down, killing in-flight streams belonging to
     other clients.
 
-    This helper returns a dedicated ``httpx.Client`` (or ``None`` on failure)
-    that callers should pass as ``http_client=`` to ``openai.OpenAI()``.
+    This helper returns a dedicated client (``httpx2.Client`` for openai 3+,
+    ``httpx.Client`` before; ``None`` on failure) that callers should pass as
+    ``http_client=`` to ``openai.OpenAI()``. ``timeout`` must come from the same
+    library (``_openai_timeout``) or be a number.
     """
     try:
-        if httpx is None:
+        module = _openai_http_module()
+        if module is None:
             return None
         kwargs = {}
         if timeout is not None:
             kwargs["timeout"] = timeout
-        kwargs["limits"] = httpx.Limits(
+        kwargs["limits"] = module.Limits(
             max_connections=100,
             max_keepalive_connections=5,
             keepalive_expiry=30,
         )
-        return httpx.Client(**kwargs)
+        return module.Client(**kwargs)
     except Exception:
         return None
 
@@ -963,19 +985,27 @@ def get_api_watchdog_state() -> Dict[str, Any]:
         }
 
 # Enable HTTP request logging for debugging
+#: Loggers of the HTTP client libraries: httpx (our direct calls, cohere) and httpx2 (openai 3,
+#: anthropic 2, mistralai 3, google-genai 3).
+_HTTP_CLIENT_LOGGER_NAMES = ('httpx', 'httpx2')
+
 def setup_http_logging():
     """Enable detailed HTTP request/response logging for debugging"""
     import logging
 
+    # httpx logs our own direct calls; httpx2 logs the SDKs that run on it
+    # (openai 3, anthropic 2, mistralai 3, google-genai 3). Same "HTTP Request: ..." lines.
+    http_loggers = [logging.getLogger(name) for name in _HTTP_CLIENT_LOGGER_NAMES]
+
     # Suppress HTTP logs during graceful stop
     if os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_HTTP_SUPPRESS') == '1':
-        httpx_logger = logging.getLogger("httpx")
-        httpx_logger.setLevel(logging.CRITICAL)
+        for httpx_logger in http_loggers:
+            httpx_logger.setLevel(logging.CRITICAL)
         return
 
-    # Enable httpx logging (used by OpenAI SDK)
-    httpx_logger = logging.getLogger("httpx")
-    httpx_logger.setLevel(logging.INFO)
+    # Enable httpx / httpx2 logging (used by the OpenAI SDK and the other SDKs)
+    for httpx_logger in http_loggers:
+        httpx_logger.setLevel(logging.INFO)
     # Enable requests logging (fallback HTTP calls)
     requests_logger = logging.getLogger("requests.packages.urllib3")
     requests_logger.setLevel(logging.INFO)
@@ -987,9 +1017,9 @@ def setup_http_logging():
     # Add a filter to suppress stale logs from previous runs (safe even if run id not set)
     # and prepend 🌐 emoji to httpx HTTP Request lines
     class _HttpEmojiFilter(logging.Filter):
-        """Prepend 🌐 to httpx 'HTTP Request' log messages."""
+        """Prepend 🌐 to httpx / httpx2 'HTTP Request' log messages."""
         def filter(self, record):
-            if record.name == 'httpx' and 'HTTP Request' in (record.getMessage() or ''):
+            if record.name in _HTTP_CLIENT_LOGGER_NAMES and 'HTTP Request' in (record.getMessage() or ''):
                 record.msg = f"🌐 {record.msg}"
             return True
 
@@ -997,10 +1027,11 @@ def setup_http_logging():
         # Avoid adding duplicates. The emoji filter by class name: it is a new class on every call
         # and in every multi-instance copy of this module (Glossarion Mobile), and two of them
         # print "🌐 🌐". Each copy keeps its own run-id filter (it passes the other copies' records).
-        if not any(isinstance(f, _RunIdFilter) for f in (getattr(httpx_logger, 'filters', None) or [])):
-            httpx_logger.addFilter(_RunIdFilter())
-        if not any(type(f).__name__ == _HttpEmojiFilter.__name__ for f in (getattr(httpx_logger, 'filters', None) or [])):
-            httpx_logger.addFilter(_HttpEmojiFilter())
+        for httpx_logger in http_loggers:
+            if not any(isinstance(f, _RunIdFilter) for f in (getattr(httpx_logger, 'filters', None) or [])):
+                httpx_logger.addFilter(_RunIdFilter())
+            if not any(type(f).__name__ == _HttpEmojiFilter.__name__ for f in (getattr(httpx_logger, 'filters', None) or [])):
+                httpx_logger.addFilter(_HttpEmojiFilter())
         if not any(isinstance(f, _RunIdFilter) for f in (getattr(openai_logger, 'filters', None) or [])):
             openai_logger.addFilter(_RunIdFilter())
     except Exception:
@@ -1013,12 +1044,14 @@ def setup_http_logging():
         formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
         console_handler.setFormatter(formatter)
 
-        httpx_logger.addHandler(console_handler)
+        for httpx_logger in http_loggers:
+            httpx_logger.addHandler(console_handler)
         requests_logger.addHandler(console_handler)
         openai_logger.addHandler(console_handler)
 
         # Prevent duplicate logs
-        httpx_logger.propagate = False
+        for httpx_logger in http_loggers:
+            httpx_logger.propagate = False
         requests_logger.propagate = False
         openai_logger.propagate = False
 
@@ -1392,7 +1425,14 @@ try:
 except (ImportError, _MOBILE_IMPORT_FAILURE):
     httpx = None
     class HTTPStatusError(Exception): pass
-    
+# httpx2: the HTTP client openai 3 / anthropic 2 / mistralai 3 / google-genai 3 run on.
+# Client, Limits and Timeout objects handed to one of those SDKs must come from here;
+# the standalone streaming code (raw SSE, proxies) keeps using httpx.
+try:
+    import httpx2
+except (ImportError, _MOBILE_IMPORT_FAILURE):
+    httpx2 = None
+
 # Gemini SDK
 try:
     from google import genai
@@ -1402,6 +1442,13 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
     genai = None
     types = None
     GENAI_AVAILABLE = False
+
+
+def new_gemini_api_client(api_key):
+    """Gemini Developer API client of this module's ``genai`` (gemini_policy pins v1beta)."""
+    if genai is None:
+        raise ImportError("google-genai is not installed")
+    return _new_gemini_api_client(api_key, genai)
 
 # Gemini gRPC client (optional - raw gRPC transport for maximum performance)
 try:
@@ -1442,19 +1489,10 @@ except (ImportError, _MOBILE_IMPORT_FAILURE):
         ChatMessage = None
     
 # Google Vertex AI API Cloud
-# NOTE: We do NOT eagerly import vertexai here — doing so loads 1,265+ proto
-# submodules (v1 + v1beta1 descriptors) and costs ~215 MB of RAM at startup.
-# Instead, check availability with find_spec (zero cost) and import lazily
-# inside each function that actually needs it.
-try:
-    import importlib.util as _ilu
-    VERTEX_AI_AVAILABLE = (
-        _ilu.find_spec('vertexai') is not None and
-        _ilu.find_spec('google.cloud.aiplatform') is not None
-    )
-    del _ilu
-except Exception:
-    VERTEX_AI_AVAILABLE = False
+# Vertex Gemini runs through google-genai (vertexai=True) and Vertex Claude through
+# anthropic.AnthropicVertex, both REST + google-auth; google-cloud-aiplatform and the
+# vertexai package are no longer used (aiplatform 2.x requires google-genai<3).
+VERTEX_AI_AVAILABLE = GENAI_AVAILABLE
 
 try:
     import deepl
@@ -5158,7 +5196,7 @@ class UnifiedClient:
         # Suppress noisy transport logs after a force-stop (applies to this process).
         try:
             import logging
-            for logger_name in ['httpx', 'openai', 'urllib3']:
+            for logger_name in ['httpx', 'httpx2', 'openai', 'urllib3']:
                 logging.getLogger(logger_name).setLevel(logging.CRITICAL)
         except Exception:
             pass
@@ -9998,7 +10036,7 @@ class UnifiedClient:
                     print(f"[DEBUG] Using default Google credentials: {os.path.basename(google_creds)}")
                 
                 with self._model_lock:
-                    self.gemini_client = genai.Client(api_key=api_key_snapshot)
+                    self.gemini_client = new_gemini_api_client(api_key_snapshot)
                 if hasattr(tls, 'model'):
                     tls.gemini_configured = True
                     tls.gemini_api_key = api_key_snapshot
@@ -16204,9 +16242,9 @@ class UnifiedClient:
     def _suppress_http_logs(self):
         """Suppress HTTP and API logging during cancellation"""
         import logging
-        # Suppress httpx logs (used by OpenAI client)
-        httpx_logger = logging.getLogger('httpx')
-        httpx_logger.setLevel(logging.CRITICAL)
+        # Suppress httpx / httpx2 logs (httpx2: the OpenAI, Anthropic, Mistral and Gemini SDKs)
+        for _name in _HTTP_CLIENT_LOGGER_NAMES:
+            logging.getLogger(_name).setLevel(logging.CRITICAL)
         
         # Suppress OpenAI client logs
         openai_logger = logging.getLogger('openai')
@@ -16233,9 +16271,9 @@ class UnifiedClient:
     def _reset_http_logs(self):
         """Reset HTTP and API logging levels for new operations"""
         import logging
-        # Reset httpx logs back to INFO
-        httpx_logger = logging.getLogger('httpx')
-        httpx_logger.setLevel(logging.INFO)
+        # Reset httpx / httpx2 logs back to INFO
+        for _name in _HTTP_CLIENT_LOGGER_NAMES:
+            logging.getLogger(_name).setLevel(logging.INFO)
         
         # Reset OpenAI client logs back to INFO
         openai_logger = logging.getLogger('openai')
@@ -16343,26 +16381,14 @@ class UnifiedClient:
 
         response = None
         try:
-            try:
-                from google.cloud import aiplatform
-            except ImportError:
-                # Glossarion Mobile (U9 Tier B): google-cloud-aiplatform needs protobuf<7 and cannot
-                # be installed next to the app's protobuf 7. Nothing below uses it (or vertexai):
-                # Vertex Gemini runs through google-genai and Vertex Claude through
-                # anthropic.AnthropicVertex, both REST + google-auth. Desktop keeps the error.
-                if not _is_mobile_runtime():
-                    raise
-                aiplatform = None
+            # No google-cloud-aiplatform / vertexai here (desktop and mobile alike): Vertex Gemini
+            # runs through google-genai (vertexai=True) and Vertex Claude through
+            # anthropic.AnthropicVertex, both REST + google-auth. aiplatform 2.x requires
+            # google-genai<3, so it is no longer installed.
             from google.oauth2 import service_account
             from google.auth.transport.requests import Request
             import google.auth.transport.requests
-            try:
-                import vertexai
-            except ImportError:
-                if not _is_mobile_runtime():
-                    raise
-                vertexai = None
-            
+
             # Get logger
             logger = logging.getLogger(__name__)
             
@@ -16417,7 +16443,6 @@ class UnifiedClient:
                 try:
                     from anthropic import AnthropicVertex
                     import anthropic
-                    import httpx
                 except ImportError:
                     raise UnifiedClientError("Anthropic SDK not installed. Run: pip install anthropic")
                 
@@ -16466,8 +16491,19 @@ class UnifiedClient:
                     "max_tokens": max_tokens,
                 }
                 if temperature is not None:
-                    kwargs["temperature"] = temperature
-                
+                    # anthropic 1.x removed temperature/top_p/top_k from messages.create (TypeError),
+                    # and its API version 2026-10-21 answers them with a 400 on every client.
+                    try:
+                        import inspect as _inspect
+                        _accepts_temperature = 'temperature' in _inspect.signature(client.messages.create).parameters
+                    except (TypeError, ValueError):
+                        _accepts_temperature = True
+                    if _accepts_temperature:
+                        kwargs["temperature"] = temperature
+                    elif not is_stop_requested():
+                        print(f"ℹ️ Vertex Claude: temperature not sent (anthropic {getattr(anthropic, '__version__', '?')} "
+                              "and API version 2026-10-21 no longer accept sampling parameters)")
+
                 if system_prompt:
                     kwargs["system"] = system_prompt
                 
@@ -16483,9 +16519,11 @@ class UnifiedClient:
                 try:
                     message = client.messages.create(**kwargs)
                     
-                except httpx.HTTPStatusError as e:
-                    # Handle HTTP status errors from the Anthropic SDK
-                    status_code = e.response.status_code if hasattr(e.response, 'status_code') else 0
+                except anthropic.APIStatusError as e:
+                    # HTTP status errors from the Anthropic SDK (it runs on httpx2 since 1.0,
+                    # so no httpx exception reaches this point)
+                    status_code = getattr(e, 'status_code', 0) or (
+                        e.response.status_code if hasattr(e.response, 'status_code') else 0)
                     error_body_raw = e.response.text if hasattr(e.response, 'text') else str(e)
                     # Sanitize HTML from error body for cleaner logs (no limit to see full error)
                     error_body = _sanitize_for_log(error_body_raw, limit=None)
@@ -16851,16 +16889,8 @@ class UnifiedClient:
                         _thinking_budget_v = 0
 
                     # Thinking level (Gemini 3)
-                    _thinking_level_v = (os.getenv("GEMINI_THINKING_LEVEL", "high") or "high").strip().lower()
-                    if _thinking_level_v not in ("minimal", "low", "medium", "high"):
-                        _thinking_level_v = "high"
-
-                    # Gemini 3 Pro (non-flash) does not accept thinking_level=minimal
-                    if ("gemini-3" in _model_lower_vertex
-                            and "pro" in _model_lower_vertex
-                            and "flash" not in _model_lower_vertex
-                            and _thinking_level_v == "minimal"):
-                        _thinking_level_v = "low"
+                    _thinking_level_v = gemini_thinking_level(
+                        _model_lower_vertex, os.getenv("GEMINI_THINKING_LEVEL", "high"))
 
                     # Gemini 2.5 Pro cannot fully disable thinking (budget=0 → error)
                     if "gemini-2.5-pro" in _model_lower_vertex and _thinking_budget_v == 0:
@@ -16912,6 +16942,7 @@ class UnifiedClient:
 
                 if uses_gemini_thinking_level(model_name):
                     omit_gemini_legacy_parameters(config_params, model_name)
+                self._apply_gemini_long_decode(config_params, model_name, _requested_max, route="Vertex AI")
                 generation_config = types.GenerateContentConfig(**config_params)
                 
                 # Configure safety settings using google-genai SDK
@@ -17078,7 +17109,8 @@ class UnifiedClient:
 
                     # Canonical FinishReason buckets (matches google-genai
                     # types.FinishReason enum names, case-sensitive).
-                    _FR_LENGTH = {'MAX_TOKENS'}
+                    # CONTINUATION: a Gemini 4 hop ended at 65,536 tokens with Long Decode off
+                    _FR_LENGTH = {'MAX_TOKENS', 'CONTINUATION'}
                     _FR_BLOCK = {
                         # Content-safety terminations — all treated as a block.
                         'SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT',
@@ -17160,7 +17192,7 @@ class UnifiedClient:
                                 if finish_reason != 'length':
                                     finish_reason = 'length'
                                     if not _vertex_fr_logged['length']:
-                                        print("✂️ Vertex finish_reason=MAX_TOKENS — output truncated; upstream truncation retry may trigger")
+                                        print(f"✂️ Vertex finish_reason={fr_name} — output truncated; upstream truncation retry may trigger")
                                         _vertex_fr_logged['length'] = True
                                 continue
                             if fr_name in _FR_OTHER_ERROR:
@@ -17810,7 +17842,9 @@ class UnifiedClient:
         IMPORTANT: This function also updates messages in-place to store reconstructed
         Content objects back in _raw_content_object so they get saved in payloads.
         """
-        from vertexai.generative_models import Content, Part
+        # google.genai types (the vertexai package is gone): Part.from_text takes text=,
+        # Part.from_bytes replaces vertexai's Part.from_data, thought_signature is bytes.
+        from google.genai.types import Content, Part
         import base64
         
         content_list = []
@@ -17825,7 +17859,7 @@ class UnifiedClient:
                 for p in msg.get('parts') or []:
                     if isinstance(p, dict):
                         if 'text' in p and p['text']:
-                            parts.append(Part.from_text(p['text']))
+                            parts.append(Part.from_text(text=p['text']))
                         elif 'thought_signature' in p and p['thought_signature']:
                             ts = p['thought_signature']
                             if isinstance(ts, dict) and ts.get('_type') == 'bytes' and ts.get('data'):
@@ -17841,7 +17875,7 @@ class UnifiedClient:
                 else:
                     # fallback to text if parts empty
                     text_val = msg.get('content') or '.'
-                    content_list.append(Content(role='model', parts=[Part.from_text(text_val)]))
+                    content_list.append(Content(role='model', parts=[Part.from_text(text=text_val)]))
 
             # For assistant messages with _raw_content_object, reconstruct Content with thought signatures
             elif role == 'assistant' and '_raw_content_object' in msg:
@@ -17849,7 +17883,7 @@ class UnifiedClient:
                 
                 # If it's already a Content object, use it directly
                 if hasattr(raw_obj, 'parts') and hasattr(raw_obj, 'role'):
-                    # This is the actual Vertex AI Content object - use it as-is
+                    # This is the actual google-genai Content object - use it as-is
                     content_list.append(raw_obj)
                 elif isinstance(raw_obj, dict) and 'parts' in raw_obj:
                     # It's a serialized dict from history
@@ -17863,7 +17897,7 @@ class UnifiedClient:
                         assistant_content = '.'
                     content_list.append(Content(
                         role='model',
-                        parts=[Part.from_text(assistant_content)]
+                        parts=[Part.from_text(text=assistant_content)]
                     ))
                     # NOTE: We keep the raw_obj in messages[msg_idx]['_raw_content_object'] as-is
                     # so the thought_signature appears in the payload file
@@ -17874,7 +17908,7 @@ class UnifiedClient:
                         fallback_content = '.'
                     content_list.append(Content(
                         role='model',
-                        parts=[Part.from_text(fallback_content)]
+                        parts=[Part.from_text(text=fallback_content)]
                     ))
             # For user messages, always create new Content
             elif role == 'user':
@@ -17886,7 +17920,7 @@ class UnifiedClient:
                         user_content = '.'
                     content_list.append(Content(
                         role='user',
-                        parts=[Part.from_text(user_content)]
+                        parts=[Part.from_text(text=user_content)]
                     ))
                 elif isinstance(user_content, list):
                     # Content is a list of parts (e.g., with images)
@@ -17897,7 +17931,7 @@ class UnifiedClient:
                             if p.get('type') == 'text' and 'text' in p:
                                 text_val = p['text']
                                 if isinstance(text_val, str) and text_val.strip():
-                                    parts_list.append(Part.from_text(text_val))
+                                    parts_list.append(Part.from_text(text=text_val))
                             elif p.get('type') == 'image_url':
                                 # Handle image parts
                                 image_url = p.get('image_url', {})
@@ -17927,13 +17961,13 @@ class UnifiedClient:
                                                 image_bytes = base64.b64decode(base64_data)
                                                 image_bytes, mime_type = self._coerce_nanogpt_input_image_to_webp(image_bytes, mime_type)
                                                 # Create image part
-                                                parts_list.append(Part.from_data(data=image_bytes, mime_type=mime_type))
+                                                parts_list.append(Part.from_bytes(data=image_bytes, mime_type=mime_type))
                                         except Exception as e:
                                             print(f"   ⚠️ Failed to decode image for Vertex AI: {e}")
                     
                     # If no parts were added, add a default text part
                     if not parts_list:
-                        parts_list.append(Part.from_text('.'))
+                        parts_list.append(Part.from_text(text='.'))
                     
                     content_list.append(Content(
                         role='user',
@@ -17943,7 +17977,7 @@ class UnifiedClient:
                     # Unknown type, use minimal default
                     content_list.append(Content(
                         role='user',
-                        parts=[Part.from_text('.')]
+                        parts=[Part.from_text(text='.')]
                     ))
             # For system messages, include as user (Gemini handles system context naturally)
             elif role == 'system':
@@ -17953,7 +17987,7 @@ class UnifiedClient:
                     system_content = '.'
                 content_list.append(Content(
                     role='user',
-                    parts=[Part.from_text(system_content)]
+                    parts=[Part.from_text(text=system_content)]
                 ))
         
         return content_list
@@ -18058,9 +18092,7 @@ class UnifiedClient:
                 except Exception:
                     is_gemini_3 = uses_gemini_thinking_level(model_lower)
             if is_gemini_3:
-                level = (os.getenv('GEMINI_THINKING_LEVEL', 'high') or 'high').strip().lower()
-                if level not in ('minimal', 'low', 'medium', 'high'):
-                    level = 'high'
+                level = gemini_thinking_level(_model_for_detect, os.getenv('GEMINI_THINKING_LEVEL', 'high'))
                 return f" (thinking level: {level})"
             # Gemini 2.x / Gemma: budget-based
             try:
@@ -20271,9 +20303,9 @@ class UnifiedClient:
         if client is None:
             timeout_obj = None
             try:
-                if httpx is not None:
+                if _openai_http_module() is not None:
                     connect, read = self._get_timeouts()
-                    timeout_obj = httpx.Timeout(connect=connect, read=read, write=read, pool=connect)
+                    timeout_obj = _openai_timeout(connect=connect, read=read, write=read, pool=connect)
                 else:
                     # Fallback: use read timeout as a single float
                     _, read = self._get_timeouts()
@@ -22046,12 +22078,7 @@ class UnifiedClient:
             level = (os.getenv('GEMINI_THINKING_LEVEL', 'high') or 'high').strip().lower()
             if level == 'none':
                 return None
-            if level not in ('minimal', 'low', 'medium', 'high'):
-                level = 'high'
-
-            # Gemini 3 Pro variants do not accept the minimal level.
-            if 'pro' in model_lower and 'flash' not in model_lower and level == 'minimal':
-                level = 'low'
+            level = gemini_thinking_level(model_lower, level)
             return {
                 "thinking_level": level.upper(),
                 "include_thoughts": True,
@@ -22072,6 +22099,22 @@ class UnifiedClient:
         if budget != 0:
             thinking_config["include_thoughts"] = True
         return thinking_config
+
+    def _apply_gemini_long_decode(self, config_params, model_name, max_output_tokens, route="Gemini") -> bool:
+        """Set ``automatic_continuation`` in a GenerateContentConfig dict from the Long Decode
+        setting (GEMINI_LONG_DECODE, see gemini_policy.gemini_long_decode). google-genai 3
+        continues by default, so Off sends False explicitly: a Gemini 4 answer then stops after
+        one 65,536-token hop (finish reason CONTINUATION, handled as truncation) as before."""
+        if types is None or 'automatic_continuation' not in getattr(types.GenerateContentConfig, 'model_fields', {}):
+            return False
+        if config_params.get('automatic_continuation') is not None:
+            return bool(config_params['automatic_continuation'])  # per-key custom parameter wins
+        enabled, reason = gemini_long_decode(model_name, max_output_tokens)
+        config_params['automatic_continuation'] = bool(enabled)
+        if enabled and not self._is_stop_requested():
+            print(f"🧵 {route} Long Decode on for {model_name}: {reason}; "
+                  f"the SDK continues past 65,536 output tokens (max_output_tokens={max_output_tokens})")
+        return enabled
 
     def _supports_thinking(self) -> bool:
         """Check if the current Gemini model supports thinking parameter"""
@@ -22482,6 +22525,18 @@ class UnifiedClient:
                 error_type="configuration",
             ) from exc
 
+        # google-genai 3.0 disabled GenerateVideos for the Gemini Developer API ("only supported
+        # in Gemini Enterprise Agent Platform mode"); it raises before any request. Say so once
+        # instead of letting the retry layer repeat it. Vertex clients still generate.
+        api_client = getattr(client, "_api_client", None)
+        if api_client is not None and not getattr(api_client, "vertexai", False):
+            raise UnifiedClientError(
+                f"Veo ({model_name}) is not available on the Gemini Developer API with google-genai 3: "
+                "Google serves Veo video generation only on Vertex AI. Use a gemini-omni video model "
+                "for the Gemini API, or a Vertex AI Veo model.",
+                error_type="configuration",
+            )
+
         prompt, image_bytes, image_mime = self._gemini_video_request_parts(messages, image_base64)
         input_image = None
         if image_bytes:
@@ -22496,12 +22551,21 @@ class UnifiedClient:
         config = gemini_types.GenerateVideosConfig(**config_values) if config_values else None
         print(f"🎬 Veo: submitting long-running video generation ({model_name})")
         try:
-            operation = client.models.generate_videos(
-                model=model_name,
-                prompt=prompt,
-                image=input_image,
-                config=config,
-            )
+            source_cls = getattr(gemini_types, "GenerateVideosSource", None)
+            if source_cls is not None:
+                # prompt=/image= are deprecated since google-genai 2.14 (removed in the next major).
+                operation = client.models.generate_videos(
+                    model=model_name,
+                    source=source_cls(prompt=prompt, image=input_image),
+                    config=config,
+                )
+            else:
+                operation = client.models.generate_videos(
+                    model=model_name,
+                    prompt=prompt,
+                    image=input_image,
+                    config=config,
+                )
             poll_interval = self._gemini_video_poll_interval()
             started_at = time.monotonic()
             while not bool(self._response_field(operation, "done", False)):
@@ -22557,7 +22621,7 @@ class UnifiedClient:
                     "The google-genai package is required for Gemini video generation",
                     error_type="configuration",
                 )
-            client = genai.Client(api_key=api_key)
+            client = new_gemini_api_client(api_key)
             if tls is not None:
                 tls.gemini_client = client
 
@@ -22590,7 +22654,7 @@ class UnifiedClient:
                     "The google-genai package is required for Gemini media generation",
                     error_type="configuration",
                 )
-            client = genai.Client(api_key=api_key)
+            client = new_gemini_api_client(api_key)
             if tls is not None:
                 tls.gemini_client = client
         return client
@@ -22923,7 +22987,7 @@ class UnifiedClient:
         model_lower = request_model.lower() if request_model else ""
 
         # Normalize unexpected values defensively
-        if thinking_level not in ("minimal", "low", "medium", "high"):
+        if thinking_level not in GEMINI_THINKING_LEVELS:
             thinking_level = "high"
 
         # If user tries to disable thinking via budget=0, map to the lowest supported level per model
@@ -22950,13 +23014,15 @@ class UnifiedClient:
             if not self._is_stop_requested() and not getattr(self, '_gemini25_thinking_alert_shown', False):
                 print("   ⚠️ Gemini 2.5 Pro does not support disabled thinking; using minimal budget of 128 instead of 0")
                 self._gemini25_thinking_alert_shown = True
-        # Gemini 3.x Pro (non-flash) does not support thinking_level=minimal; coerce to low.
-        if "gemini-3" in model_lower and "pro" in model_lower and "flash" not in model_lower:
-            if thinking_level == "minimal":
-                thinking_level = "low"
-                if not getattr(self.__class__, '_gemini3_pro_minimal_alert_shown', False) and not self._is_stop_requested():
-                    print("   ⚠️ Gemini 3 Pro does not support thinking_level=minimal; falling back to low")
-                    self.__class__._gemini3_pro_minimal_alert_shown = True
+        # Levels a model does not have (minimal on Gemini 3 Pro / Gemini 4, xhigh outside
+        # Gemini 4 Neon/Hydrogen) fall back to the nearest one it accepts.
+        _supported_level = gemini_thinking_level(model_lower, thinking_level)
+        if _supported_level != thinking_level:
+            _alert_key = f"_gemini_level_alert_{thinking_level}_{model_lower}"
+            if not getattr(self.__class__, _alert_key, False) and not self._is_stop_requested():
+                print(f"   ⚠️ {request_model} does not support thinking_level={thinking_level}; using {_supported_level}")
+                setattr(self.__class__, _alert_key, True)
+            thinking_level = _supported_level
         
         # Check if image output mode is enabled
         enable_image_output = self._image_output_mode_enabled()
@@ -23304,6 +23370,9 @@ class UnifiedClient:
                     
                     if use_grpc_transport and not self._is_stop_requested():
                         print(f"⚡ [gemini-grpc] Using raw gRPC transport (endpoint: {grpc_ep})")
+                        if gemini_long_decode(request_model, max_tokens)[0]:
+                            print("⚠️ [gemini-grpc] Long Decode not applied: the gRPC transport has no "
+                                  "continuation token; the answer stops after 65,536 output tokens")
                         import threading as _thr
                         _think = self._get_thinking_status_label()
                         print(f"📤 [{_thr.current_thread().name}] API call in progress (model={self.model}){_think}")
@@ -23559,6 +23628,7 @@ class UnifiedClient:
                             contents = [{'role': 'user', 'parts': [{'text': formatted_prompt}]}]
                         else:
                             contents = formatted_prompt
+                    self._apply_gemini_long_decode(generation_config_params, request_model, max_tokens)
                     # Only add thinking_config if the model supports it
                     if supports_thinking:
                         # Create thinking config separately
@@ -23834,7 +23904,9 @@ class UnifiedClient:
                                     finish_reason = 'stop'
                                 elif fr_name in ('FINISH_REASON_UNSPECIFIED', 'NONE'):
                                     continue
-                                elif fr_name == 'MAX_TOKENS':
+                                elif fr_name in ('MAX_TOKENS', 'CONTINUATION'):
+                                    # CONTINUATION: a Gemini 4 hop ended at 65,536 tokens and Long
+                                    # Decode is off (or the SDK stopped continuing): truncated.
                                     finish_reason = 'length'
                                 elif fr_name == 'MALFORMED_FUNCTION_CALL':
                                     finish_reason = 'malformed_function_call'
@@ -25650,29 +25722,31 @@ class UnifiedClient:
 
                     timeout_obj = None
                     try:
-                        if httpx is not None:
+                        if _openai_http_module() is not None:
                             connect, read = self._get_timeouts()
                             if provider == 'local' and read is not None and self._is_on_device_endpoint(base_url):
                                 # the on-device engine answers only after loading the model and after the
                                 # requests queued ahead of this one: no short read timeout there (a
                                 # desktop ollama / lmstudio / llama-server keeps the configured timeout)
                                 read = max(float(read), self._LOCAL_MIN_READ_TIMEOUT)
-                            timeout_obj = httpx.Timeout(connect=connect, read=read, write=read, pool=connect)
+                            timeout_obj = _openai_timeout(connect=connect, read=read, write=read, pool=connect)
                         else:
                             _, read = self._get_timeouts()
                             timeout_obj = float(read) if read is not None else None
                     except Exception:
                         timeout_obj = None
 
-                    # Isolate httpx connection pool: single connection, no keepalive.
+                    # Isolate the connection pool: single connection, no keepalive.
                     # Each per-attempt client gets its own pool so closing one client
                     # cannot destroy sockets belonging to a sibling parallel stream.
                     # This prevents WinError 10038 on Windows during parallel OCR.
+                    # httpx2 for openai 3+, httpx before (_openai_http_module), matching timeout_obj.
                     try:
-                        if httpx is not None:
-                            _http_client = httpx.Client(
+                        _sdk_http = _openai_http_module()
+                        if _sdk_http is not None:
+                            _http_client = _sdk_http.Client(
                                 timeout=timeout_obj,
-                                limits=httpx.Limits(
+                                limits=_sdk_http.Limits(
                                     max_connections=1,
                                     max_keepalive_connections=0,
                                     keepalive_expiry=0,
@@ -34142,7 +34216,7 @@ class UnifiedClient:
                 raise UnifiedClientError("DeepL API key not found. Set DEEPL_API_KEY environment variable or configure in settings.")
             
             # Initialize DeepL translator
-            translator = deepl.Translator(deepl_api_key)
+            translator = deepl.DeepLClient(deepl_api_key)  # deepl 2.0 removed Translator
             
             # Extract ONLY user content to translate - ignore AI system prompts
             text_to_translate = ""

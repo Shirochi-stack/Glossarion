@@ -975,7 +975,8 @@ class AsyncAPIProcessor:
                 from google import genai
                 
                 api_key = self._get_api_key()
-                client = genai.Client(api_key=api_key)
+                from gemini_policy import new_gemini_api_client
+                client = new_gemini_api_client(api_key, genai)
                 
                 # Get batch job status
                 batch_job = client.batches.get(name=job.job_id)
@@ -1303,7 +1304,8 @@ class AsyncAPIProcessor:
             api_key = self._get_api_key()
             
             # Create client with API key
-            client = genai.Client(api_key=api_key)
+            from gemini_policy import new_gemini_api_client
+            client = new_gemini_api_client(api_key, genai)
             
             # Get the batch job
             batch_job = client.batches.get(name=job.job_id)
@@ -2081,7 +2083,8 @@ class AsyncBatchJobMixin:
             from google import genai
             
             # Create client
-            client = genai.Client(api_key=api_key)
+            from gemini_policy import new_gemini_api_client
+            client = new_gemini_api_client(api_key, genai)
             
             # Try to cancel using the SDK
             # Note: The SDK might not have a cancel method yet
@@ -3609,7 +3612,8 @@ class AsyncBatchJobMixin:
             from google.genai import types
             
             # Configure client with API key
-            client = genai.Client(api_key=api_key)
+            from gemini_policy import new_gemini_api_client
+            client = new_gemini_api_client(api_key, genai)
             
             # Log for debugging
             logger.info(f"Submitting Gemini batch with model: {model}")

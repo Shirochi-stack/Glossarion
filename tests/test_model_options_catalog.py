@@ -1308,7 +1308,27 @@ def test_veo_uses_long_running_operation_polling_and_saves_mp4(tmp_path, monkeyp
     assert output_path.read_bytes() == expected_video
     assert response.content == f"[GENERATED_VIDEO:{output_path}]"
     assert submitted[0]["model"] == "veo-3.1-generate-preview"
-    assert submitted[0]["prompt"] == "A cinematic waterfall"
+    # google-genai 2.14+: prompt/image go in GenerateVideosSource (the old kwargs are deprecated)
+    source = submitted[0].get("source")
+    prompt = source.prompt if source is not None else submitted[0]["prompt"]
+    assert prompt == "A cinematic waterfall"
+
+
+def test_veo_on_the_gemini_developer_api_fails_once_with_a_clear_error(tmp_path, monkeypatch):
+    """google-genai 3 disabled GenerateVideos outside Vertex AI: no request, a configuration error."""
+    client = _bare_gemini_video_client(tmp_path, monkeypatch)
+    import unified_api_client as uac
+
+    class FakeModels:
+        def generate_videos(self, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("generate_videos called on a Developer API client")
+
+    fake_sdk = SimpleNamespace(models=FakeModels(), _api_client=SimpleNamespace(vertexai=False))
+    with pytest.raises(uac.UnifiedClientError) as info:
+        client._send_gemini_veo_video(
+            fake_sdk, [{"role": "user", "content": "A waterfall"}], "response.txt", "veo-3.1-generate-preview")
+    assert info.value.error_type == "configuration"
+    assert "Vertex AI" in str(info.value)
 
 
 def test_gemini_video_provider_safety_error_is_prohibited_content(tmp_path, monkeypatch):
