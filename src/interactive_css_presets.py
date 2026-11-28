@@ -364,6 +364,202 @@ _PRESET_SPECS = (
                  "@keyframes glx-blink {\n  0% { opacity: 1; }\n  50% { opacity: 0; }\n  100% { opacity: 1; }\n}",
         'motion': "  .glx-system-message::after {\n    animation: glx-blink 1s steps(1, end) infinite;\n  }\n",
     },
+    # ---- fantasy ----------------------------------------------------------------------------------
+    {
+        'name': 'Arcane Runes',
+        'body_font': "Georgia, 'Palatino Linotype', serif", 'heading_font': "'Palatino Linotype', Georgia, serif",
+        'status_font': "'Segoe UI', Roboto, Arial, sans-serif",
+        'text': '#e3dcf5', 'page': '#150f26', 'heading': '#c9a8ff', 'accent': '#8f6bff', 'muted': '#a99cc9',
+        'panel': '#211a3a', 'rule': '#4a3b7a', 'stripe': '#271f46', 'hover': '#34285e', 'system': '#7fe3ff',
+        'glow': '#8f6bff', 'radius': '8px',
+        'h1': 'letter-spacing: 0.1em; text-shadow: 0 0 10px #8f6bff;',
+        'status_border': '1px solid #8f6bff',
+        'status_window': 'box-shadow: 0 0 14px rgba(143, 107, 255, 0.45), inset 0 0 18px rgba(143, 107, 255, 0.12);',
+        'system_message': 'border-radius: 6px; box-shadow: 0 0 8px rgba(127, 227, 255, 0.35);',
+        'illustration': 'border: 1px solid #4a3b7a; box-shadow: 0 0 16px rgba(143, 107, 255, 0.4);',
+        'extra': ".glx-book h1::before { content: '\\16B1  '; color: #7fe3ff; }\n"
+                 ".glx-book h1::after { content: '  \\16B1'; color: #7fe3ff; }\n"
+                 ".glx-scene-break::before { content: '\\16A0  \\16A2  \\16A6'; }\n"
+                 "@keyframes glx-rune-pulse {\n  0% { opacity: 0.55; letter-spacing: 0.3em; }\n"
+                 "  50% { opacity: 1; letter-spacing: 0.5em; }\n  100% { opacity: 0.55; letter-spacing: 0.3em; }\n}",
+        'motion': "  .glx-scene-break {\n    animation: glx-rune-pulse 4.5s ease-in-out infinite;\n  }\n"
+                  "  .glx-system-message {\n    animation: glx-glow-pulse 3s ease-in-out infinite;\n  }\n",
+    },
+    {
+        'name': "Dragon's Hoard",
+        'body_font': "Georgia, 'Times New Roman', serif", 'heading_font': "'Palatino Linotype', Georgia, serif",
+        'text': '#eadfc8', 'page': '#1d130d', 'heading': '#f2c14e', 'accent': '#d9922b', 'muted': '#b8a888',
+        'panel': '#2b1d12', 'rule': '#6b4a1c', 'stripe': '#332315', 'hover': '#46301a', 'system': '#ffb347',
+        'glow': '#ffcf5c',
+        'h1': 'letter-spacing: 0.07em; text-shadow: 0 1px 0 #6b4a1c, 0 0 10px #d9922b;',
+        'status_border': '2px solid #d9922b',
+        'status_head': '#3a2812',
+        'status_window': 'box-shadow: 0 0 12px rgba(217, 146, 43, 0.4);',
+        'system_message': 'border-left-width: 5px; text-shadow: 0 0 5px #d9922b;',
+        'illustration': 'border: 2px solid #d9922b; box-shadow: 0 0 14px rgba(255, 207, 92, 0.35);',
+        'blockquote': 'border-left: 4px solid #d9922b;',
+        'extra': ".glx-scene-break::before { content: '\\25C6  '; }\n.glx-scene-break::after { content: '  \\25C6'; }\n"
+                 "@keyframes glx-gold-gleam {\n  0% { text-shadow: 0 0 3px #d9922b; }\n"
+                 "  50% { text-shadow: 0 0 14px #ffcf5c, 0 0 3px #fff2c0; }\n  100% { text-shadow: 0 0 3px #d9922b; }\n}",
+        'motion': "  .glx-book h1 {\n    animation: glx-gold-gleam 3.5s ease-in-out infinite;\n  }\n"
+                  "  .glx-system-message {\n    animation: glx-gold-gleam 3s ease-in-out infinite;\n  }\n",
+    },
+    {
+        'name': 'Elven Grove',
+        'body_font': "Garamond, Georgia, serif", 'heading_font': "Garamond, 'Palatino Linotype', serif",
+        'text': '#24322a', 'page': '#f1f6ea', 'heading': '#2f6b45', 'accent': '#5f9e6e', 'muted': '#566a5c',
+        'panel': '#e3eedb', 'rule': '#b7d0b0', 'stripe': '#dce9d3', 'hover': '#cfe2c6', 'system': '#2f7a55',
+        'glow': '#9fd8a8', 'radius': '16px', 'line_height': '1.7',
+        'h1': 'font-weight: normal; letter-spacing: 0.05em; font-style: italic;',
+        'dialogue': 'padding: 0.3em 0.9em; background-color: #e9f2e2; border-radius: 14px;',
+        'status_window': 'border-radius: 14px;',
+        'system_message': 'border-radius: 12px;',
+        'illustration': 'border: 3px solid #b7d0b0;',
+        'extra': ".glx-scene-break::before { content: '\\2767  '; }\n.glx-scene-break::after { content: '  \\2767'; }\n"
+                 "@keyframes glx-sway {\n  0% { transform: rotate(-0.6deg); }\n  50% { transform: rotate(0.6deg); }\n"
+                 "  100% { transform: rotate(-0.6deg); }\n}",
+        'motion': "  .glx-figure {\n    animation: glx-sway 7s ease-in-out infinite;\n  }\n"
+                  "  .glx-scene-break {\n    animation: glx-shimmer 4s ease-in-out infinite;\n  }\n",
+    },
+    {
+        'name': "Necromancer's Grimoire",
+        'body_font': "Georgia, 'Times New Roman', serif", 'heading_font': "'Palatino Linotype', Georgia, serif",
+        'text': '#d3d8cc', 'page': '#0b0f0c', 'heading': '#7dff9a', 'accent': '#4fd47a', 'muted': '#8fa393',
+        'panel': '#131a15', 'rule': '#2c4a35', 'stripe': '#18211b', 'hover': '#233a2a', 'system': '#9dffb4',
+        'glow': '#3dff7d',
+        'h1': 'letter-spacing: 0.12em; text-shadow: 0 0 8px #2fbf62;',
+        'status_border': '1px solid #4fd47a',
+        'status_window': 'box-shadow: 0 0 12px rgba(61, 255, 125, 0.3), inset 0 0 20px rgba(0, 0, 0, 0.6);',
+        'letter': 'font-style: italic; background-color: #d9d0b4; color: #2a2518; border: 1px solid #6e6544;',
+        'system_message': 'text-shadow: 0 0 5px #3dff7d;',
+        'sfx': 'text-transform: uppercase;',
+        'extra': ".glx-scene-break::before { content: '\\2620  '; }\n.glx-scene-break::after { content: '  \\2620'; }\n"
+                 "@keyframes glx-wither {\n  0% { opacity: 1; }\n  40% { opacity: 0.45; }\n  55% { opacity: 1; }\n"
+                 "  75% { opacity: 0.7; }\n  100% { opacity: 1; }\n}",
+        'motion': "  .glx-sfx {\n    animation: glx-wither 2s steps(5, end) infinite;\n  }\n"
+                  "  .glx-system-message {\n    animation: glx-glow-pulse 3.2s ease-in-out infinite;\n  }\n",
+    },
+    {
+        'name': 'Celestial Starfall',
+        'body_font': "Georgia, 'Palatino Linotype', serif", 'heading_font': "'Palatino Linotype', Georgia, serif",
+        'text': '#e6ecfa', 'page': '#0a1030', 'heading': '#ffe9a8', 'accent': '#8fb4ff', 'muted': '#a7b4d6',
+        'panel': '#131c4a', 'rule': '#34457f', 'stripe': '#18235a', 'hover': '#233070', 'system': '#bcd2ff',
+        'glow': '#ffe9a8', 'radius': '10px',
+        'h1': 'letter-spacing: 0.1em; text-shadow: 0 0 10px #8fb4ff;',
+        'status_border': '1px solid #8fb4ff',
+        'status_window': 'box-shadow: 0 0 14px rgba(143, 180, 255, 0.4);',
+        'illustration': 'border: 1px solid #34457f; box-shadow: 0 0 18px rgba(255, 233, 168, 0.35);',
+        'extra': ".glx-book { background-image: radial-gradient(circle at 12% 18%, rgba(255, 255, 255, 0.55) 0, "
+                 "rgba(255, 255, 255, 0) 1.5px), radial-gradient(circle at 78% 42%, rgba(255, 255, 255, 0.45) 0, "
+                 "rgba(255, 255, 255, 0) 1.5px), radial-gradient(circle at 44% 80%, rgba(255, 233, 168, 0.5) 0, "
+                 "rgba(255, 233, 168, 0) 2px); background-size: 260px 260px; }\n"
+                 ".glx-scene-break::before { content: '\\2726  '; }\n.glx-scene-break::after { content: '  \\2726'; }\n"
+                 "@keyframes glx-twinkle {\n  0% { opacity: 0.6; text-shadow: 0 0 2px #ffe9a8; }\n"
+                 "  50% { opacity: 1; text-shadow: 0 0 14px #ffe9a8; }\n  100% { opacity: 0.6; text-shadow: 0 0 2px #ffe9a8; }\n}\n"
+                 "@keyframes glx-drift {\n  0% { background-position: 0 0; }\n  100% { background-position: 0 260px; }\n}",
+        'motion': "  .glx-book {\n    animation: glx-drift 90s linear infinite;\n  }\n"
+                  "  .glx-scene-break {\n    animation: glx-twinkle 3s ease-in-out infinite;\n  }\n",
+    },
+    # ---- leveling system ----------------------------------------------------------------------------
+    {
+        'name': 'Level Up Burst',
+        'body_font': "'Segoe UI', Roboto, Arial, sans-serif", 'heading_font': "'Segoe UI', Roboto, Arial, sans-serif",
+        'text': '#1f2430', 'page': '#fffdf4', 'heading': '#c2410c', 'accent': '#f59e0b', 'muted': '#555b6b',
+        'panel': '#fff4d6', 'rule': '#f3c969', 'stripe': '#fff0c2', 'hover': '#ffe39a', 'system': '#b45309',
+        'glow': '#ffb300', 'radius': '8px',
+        'h1': 'text-transform: uppercase; letter-spacing: 0.1em;',
+        'status_border': '2px solid #f59e0b',
+        'status_window': 'box-shadow: 0 2px 12px rgba(245, 158, 11, 0.35);',
+        'system_message': 'font-weight: bold; border-left-width: 6px; border-radius: 6px;',
+        'extra': ".glx-system-message::before { content: '\\2605  '; color: #f59e0b; }\n"
+                 ".glx-glow { font-weight: bold; text-transform: uppercase; letter-spacing: 0.08em; }\n"
+                 "@keyframes glx-burst {\n  0% { transform: scale(1); text-shadow: 0 0 2px #ffb300; }\n"
+                 "  40% { transform: scale(1.12); text-shadow: 0 0 16px #ffb300, 0 0 30px #ff7a00; }\n"
+                 "  100% { transform: scale(1); text-shadow: 0 0 2px #ffb300; }\n}\n"
+                 "@keyframes glx-slide-in {\n  from { opacity: 0; transform: translateX(-24px); }\n"
+                 "  to { opacity: 1; transform: translateX(0); }\n}",
+        'motion': "  .glx-glow {\n    display: inline-block;\n    animation: glx-burst 1.8s ease-out infinite;\n  }\n"
+                  "  .glx-system-message {\n    animation: glx-slide-in 0.8s ease-out 1 both;\n  }\n",
+    },
+    {
+        'name': 'Quest Log',
+        'body_font': "Georgia, 'Palatino Linotype', serif", 'heading_font': "'Palatino Linotype', Georgia, serif",
+        'status_font': "'Segoe UI', Roboto, Arial, sans-serif",
+        'text': '#3a2f22', 'page': '#f4e8cf', 'heading': '#5a3a14', 'accent': '#a8741a', 'muted': '#6b5a40',
+        'panel': '#ecdcb8', 'rule': '#c9aa6c', 'stripe': '#e6d4ab', 'hover': '#dcc690', 'system': '#7a4a0f',
+        'glow': '#e0a93a', 'radius': '4px',
+        'h1': 'border-bottom: 2px solid #a8741a; padding-bottom: 0.2em;',
+        'status_border': '2px solid #a8741a',
+        'system_message': 'font-weight: bold; border-left-width: 6px;',
+        'illustration': 'border: 4px solid #ecdcb8; box-shadow: 0 2px 8px rgba(90, 58, 20, 0.35);',
+        'extra': ".glx-book li { list-style-type: none; }\n"
+                 ".glx-book li::before { content: '\\2610  '; color: #a8741a; }\n"
+                 ".glx-system-message::before { content: '\\2757  '; color: #a8741a; }\n"
+                 ".glx-scene-break::before { content: '\\2014  '; }\n.glx-scene-break::after { content: '  \\2014'; }\n"
+                 "@keyframes glx-slide-in {\n  from { opacity: 0; transform: translateX(-24px); }\n"
+                 "  to { opacity: 1; transform: translateX(0); }\n}",
+        'motion': "  .glx-system-message {\n    animation: glx-slide-in 0.7s ease-out 1 both;\n  }\n",
+    },
+    {
+        'name': 'Dungeon System',
+        'body_font': "'Segoe UI', Roboto, Arial, sans-serif", 'heading_font': "'Segoe UI', Roboto, Arial, sans-serif",
+        'status_font': "Consolas, 'Courier New', monospace",
+        'text': '#c7d6ea', 'page': '#070b14', 'heading': '#5db7ff', 'accent': '#2e93ff', 'muted': '#8296b3',
+        'panel': '#0d1626', 'rule': '#1d3a63', 'stripe': '#101c32', 'hover': '#17305a', 'system': '#6cc4ff',
+        'glow': '#3aa0ff', 'radius': '2px',
+        'h1': 'text-transform: uppercase; letter-spacing: 0.16em; text-shadow: 0 0 10px #2e93ff;',
+        'status_border': '1px solid #3aa0ff',
+        'status_head': '#10264a',
+        'status_text': '#9fd0ff',
+        'status_window': 'box-shadow: 0 0 18px rgba(58, 160, 255, 0.5), inset 0 0 22px rgba(58, 160, 255, 0.15);',
+        'system_message': 'text-transform: uppercase; letter-spacing: 0.05em; border: 1px solid #1d3a63; '
+                          'border-left: 4px solid #3aa0ff;',
+        'extra': ".glx-system-message::before { content: '[ '; }\n.glx-system-message::after { content: ' ]'; }\n"
+                 ".glx-status-window td + td { color: #5db7ff; font-weight: bold; }\n"
+                 "@keyframes glx-boot {\n  0% { opacity: 0; transform: scaleY(0.92); }\n"
+                 "  60% { opacity: 1; transform: scaleY(1.02); }\n  100% { opacity: 1; transform: scaleY(1); }\n}",
+        'motion': "  .glx-status-window {\n    animation: glx-boot 1s ease-out 1 both;\n  }\n"
+                  "  .glx-system-message {\n    animation: glx-reveal 1.8s steps(30, end) 1 both;\n  }\n",
+    },
+    {
+        'name': 'Skill Tree Glow',
+        'body_font': "'Segoe UI', Roboto, Arial, sans-serif", 'heading_font': "'Segoe UI', Roboto, Arial, sans-serif",
+        'status_font': "'Segoe UI', Roboto, Arial, sans-serif",
+        'text': '#d6e2ee', 'page': '#10161f', 'heading': '#7be0c3', 'accent': '#3fcfa5', 'muted': '#8ba0b3',
+        'panel': '#17202c', 'rule': '#27445a', 'stripe': '#1b2735', 'hover': '#233a4d', 'system': '#7be0c3',
+        'glow': '#3fcfa5', 'radius': '10px',
+        'h1': 'letter-spacing: 0.06em;',
+        'status_border': '1px solid #3fcfa5',
+        'status_window': 'box-shadow: 0 0 12px rgba(63, 207, 165, 0.3);',
+        'system_message': 'border-radius: 8px;',
+        'extra': ".glx-book ul, .glx-book ol { border-left: 2px solid #27445a; padding-left: 0.4em; }\n"
+                 ".glx-book li::marker { content: '\\25C6  '; color: #3fcfa5; }\n"
+                 ".glx-glow { padding: 0 0.5em; border: 1px solid #3fcfa5; border-radius: 999px; }\n"
+                 "@keyframes glx-ring {\n  0% { box-shadow: 0 0 2px rgba(63, 207, 165, 0.6); }\n"
+                 "  50% { box-shadow: 0 0 14px rgba(63, 207, 165, 0.95); }\n  100% { box-shadow: 0 0 2px rgba(63, 207, 165, 0.6); }\n}",
+        'motion': "  .glx-glow {\n    animation: glx-ring 2.4s ease-in-out infinite;\n  }\n"
+                  "  .glx-status-window {\n    animation: glx-shimmer 4s ease-in-out infinite;\n  }\n",
+    },
+    {
+        'name': 'Guild Card',
+        'body_font': "'Segoe UI', Roboto, Arial, sans-serif", 'heading_font': "Georgia, 'Times New Roman', serif",
+        'status_font': "'Segoe UI', Roboto, Arial, sans-serif",
+        'text': '#262a31', 'page': '#eef0f3', 'heading': '#34495e', 'accent': '#7b8794', 'muted': '#5b6572',
+        'panel': '#dfe3e8', 'rule': '#b6bcc6', 'stripe': '#e6e9ed', 'hover': '#d3d9e1', 'system': '#34495e',
+        'glow': '#c7a24b', 'radius': '10px',
+        'h1': 'letter-spacing: 0.08em; text-transform: uppercase;',
+        'status_border': '2px solid #8a94a3',
+        'status_head': '#c9d0d9',
+        'status_window': 'border-radius: 10px; background-image: linear-gradient(115deg, rgba(255, 255, 255, 0) 40%, '
+                         'rgba(255, 255, 255, 0.55) 50%, rgba(255, 255, 255, 0) 60%); background-size: 260% 100%; '
+                         'background-position: 120% 0; background-repeat: no-repeat; '
+                         'box-shadow: 0 3px 10px rgba(52, 73, 94, 0.25);',
+        'system_message': 'border-radius: 8px; border-left-color: #c7a24b;',
+        'illustration': 'border: 3px solid #b6bcc6;',
+        'extra': ".glx-scene-break::before { content: '\\2694  '; }\n.glx-scene-break::after { content: '  \\2694'; }\n"
+                 "@keyframes glx-sheen {\n  0% { background-position: 120% 0; }\n  100% { background-position: -20% 0; }\n}",
+        'motion': "  .glx-status-window {\n    animation: glx-sheen 5s ease-in-out infinite;\n  }\n",
+    },
 )
 
 #: name -> stylesheet (read-only; "Duplicate" makes an editable user copy)
@@ -720,6 +916,7 @@ SAMPLE_CHAPTER_HTML = f"""<body class="glx-book">
 <p class="glx-dialogue">"The bridge was closed. I had to go around." She shook the water from her hood.</p>
 <p class="glx-thought">He's worried, she thought. He only studies maps that closely when he's worried.</p>
 <p class="glx-system-message">[System] A new quest has been unlocked: The Lantern Gate.</p>
+<p class="glx-system-message glx-glow">[Level Up!] Mira has reached level 13. All stats increased.</p>
 <table class="glx-status-window">
 <tr><th>Status</th><th>Mira</th></tr>
 <tr><td>Level</td><td>12</td></tr>

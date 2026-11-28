@@ -1,5 +1,6 @@
-"""Interactive styles: the 12 built-in presets are scoped under .glx-, CSS-only and degrade without
-animation; scope_css rewrites and cleans; user presets; the preview document (GUI-free)."""
+"""Interactive styles: the 22 built-in presets (12 general + 10 fantasy / leveling-system ones) are scoped under
+.glx-, CSS-only and degrade without animation; scope_css rewrites and cleans; user presets; the preview document
+(GUI-free)."""
 import re
 import sys
 from pathlib import Path
@@ -13,7 +14,10 @@ if str(SRC) not in sys.path:
 import interactive_css_presets as presets  # noqa: E402
 
 EXPECTED = ('Classic Book', 'Dark Fantasy', 'Cyberpunk Neon', 'LitRPG Status Window', 'Romance Pastel', 'Wuxia Ink',
-            'Gothic Horror', 'Sci-Fi HUD', 'Minimal Modern', 'Royal Court', 'Cozy Slice-of-Life', 'Retro Terminal')
+            'Gothic Horror', 'Sci-Fi HUD', 'Minimal Modern', 'Royal Court', 'Cozy Slice-of-Life', 'Retro Terminal',
+            'Arcane Runes', "Dragon's Hoard", 'Elven Grove', "Necromancer's Grimoire", 'Celestial Starfall',
+            'Level Up Burst', 'Quest Log', 'Dungeon System', 'Skill Tree Glow', 'Guild Card')
+FANTASY_AND_LEVELING = EXPECTED[12:]
 
 
 def _selectors(css):
@@ -30,9 +34,23 @@ def _selectors(css):
     return out
 
 
-def test_twelve_builtin_presets():
+def test_builtin_presets():
     assert presets.BUILTIN_PRESET_NAMES == EXPECTED
     assert set(presets.BUILTIN_PRESETS) == set(EXPECTED)
+    assert len(FANTASY_AND_LEVELING) == 10
+
+
+@pytest.mark.parametrize("name", FANTASY_AND_LEVELING)
+def test_new_presets_animate_with_defined_keyframes_only_when_motion_is_allowed(name):
+    css = presets.BUILTIN_PRESETS[name]
+    media = css.split('@media (prefers-reduced-motion: no-preference)', 1)[1]
+    assert 'animation' in media                                  # every new preset moves, somewhere
+    defined = set(re.findall(r'@keyframes\s+([\w-]+)', css))
+    used = set()
+    for value in re.findall(r'animation(?:-name)?\s*:\s*([^;]+);', css):
+        used.update(re.findall(r'glx-[\w-]+', value))
+    assert used and used <= defined, used - defined
+    assert 'url(' not in css and '@import' not in css
 
 
 @pytest.mark.parametrize("name", EXPECTED)
@@ -111,7 +129,8 @@ def test_preview_document_has_every_sample_part_and_no_script():
     assert '<script' not in html.lower()
     for part in ('<h1>', '<h2>', 'class="glx-dialogue"', 'class="glx-status-window"', '<ul>', '<blockquote>',
                  'class="glx-reveal"', '<details><summary>', 'class="glx-scene-break"', 'class="glx-letter"',
-                 'class="glx-figure"', 'data:image/svg+xml;base64,', 'class="glx-system-message"'):
+                 'class="glx-figure"', 'data:image/svg+xml;base64,', 'class="glx-system-message"',
+                 'class="glx-system-message glx-glow"'):   # the level-up line
         assert part in html, part
     assert html.count('<tr>') == 7  # header + 6 rows
 
