@@ -18,6 +18,7 @@ import flet as ft
 
 from glossarion_mobile.ui import tokens
 from glossarion_mobile.ui.components.dialogs import close_dialog
+from glossarion_mobile.ui.theme import HIT_TARGET
 
 __all__ = ["ALL_CHAPTERS", "ALL_CHARACTERS", "ImagesGallery", "THUMB_SIZE"]
 
@@ -302,7 +303,7 @@ class ImagesGallery:
         return ft.Container(content=ft.Column([
             ft.Row([ft.Text("🖼 Gallery", theme_style=ft.TextThemeStyle.TITLE_MEDIUM, weight=ft.FontWeight.W_600,
                             expand=True),
-                    self.count_text, ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Close", on_click=lambda e: self.close(),
+                    self.count_text, ft.IconButton(icon=ft.Icons.CLOSE, tooltip="Close", on_click=lambda e: self.close(), size_constraints=HIT_TARGET,
                                                    key=f"{self.key}-close")],
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([self.character_dd, self.chapter_dd], spacing=8),
