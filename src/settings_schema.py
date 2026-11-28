@@ -394,6 +394,8 @@ SECTION_OVERRIDES = {
     "glossary_relations_field_name": "internal.state",
     # the user-edited placeholder texts (Glossary Manager > right-click "Available placeholders")
     "glossary_placeholder_texts": "internal.state",
+    # the Interactive Images placeholder texts (settings dialog, right-click a prompt > "Edit placeholder text...")
+    "interactive_images_placeholder_texts": "internal.state",
     # legacy keys that desktop startup migrates or removes (kept so old configs round-trip)
     "conservative_batching": "internal.state",
     "conservative_batch_multiplier": "internal.state",
@@ -602,6 +604,8 @@ DEFAULT_REFS = {
     # GlossaryManager_GUI._default_single_pass_header_prompt == this constant; extract_glossary_from_epub
     # falls back to it when SINGLE_PASS_GLOSSARY_HEADER_PROMPT is empty
     "single_pass_glossary_header_prompt": "extract_glossary_from_epub:DEFAULT_SINGLE_PASS_GLOSSARY_HEADER_PROMPT",
+    # the Auto aspect ratio checklist's default selection (the dialog binds a list literal the generator cannot read)
+    "interactive_images_aspect_choices": "interactive_images_core:DEFAULT_ASPECT_CHOICES",
 }
 
 # Defaults computed at runtime on desktop (effective_default returns None for them).
@@ -705,7 +709,8 @@ CHOICES_OVERRIDES = {
     # Interactive Images settings dialog combos (interactive_images_core.RESOLUTIONS / ASPECT_RATIOS; pinned
     # equal by tests/test_interactive_images_core.py)
     "interactive_images_resolution": ("1K", "2K", "4K"),
-    "interactive_images_aspect_ratio": ("auto", "1:1", "3:4", "4:3", "2:3", "3:2", "9:16", "16:9"),
+    "interactive_images_aspect_ratio": ("auto", "1:1", "3:4", "4:3", "2:3", "3:2", "9:16", "16:9", "21:9"),
+    "interactive_images_subjects": ("characters", "backgrounds", "both"),
 }
 
 # U9: types the generator inferred from a text widget although the stored value is structured
@@ -734,6 +739,8 @@ TYPE_OVERRIDES = {
     "temperature": "float",
     # Other Settings › Debug Controls › Show CMD (console_window; checkbox stored as a boolean)
     "show_cmd": "bool",
+    # the Interactive Images dialog's Auto aspect ratio checklist (a list of the ticked ratios)
+    "interactive_images_aspect_choices": "list",
 }
 
 # U9: settings mobile shows but never edits in a plain tile: structured stores a dedicated surface
@@ -776,6 +783,8 @@ READONLY_REASONS = {
         "direct_text_rendered_card_limit", "direct_text_skip_prompt_profile",
         "direct_text_skip_system_prompt_profile", "direct_text_skip_user_prompt_profile",
     )},
+    # the Auto aspect ratio checklist: Tools > Interactive Images > Models edits it as a list of ticked ratios
+    "interactive_images_aspect_choices": "Edited in Tools › Interactive Images › Models (the ratios Auto picks from)",
 }
 
 # U9: curated labels that replace the generated widget text where the generator picked a
@@ -986,6 +995,8 @@ LABEL_OVERRIDES = {
     "interactive_images_auto_after_translation": "Run Interactive Images after each translation",
     "interactive_images_recompile_after": "Recompile the EPUB/PDF afterwards (if it was compiled)",
     "interactive_css_enabled": "Interactive styles",
+    "interactive_images_include_gender": "Include gender with character names",
+    "interactive_images_aspect_choices": "Ratios Auto picks from",
 }
 
 

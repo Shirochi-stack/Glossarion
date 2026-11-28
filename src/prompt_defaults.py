@@ -77,10 +77,12 @@ Recent translations to summarize:
 
 # ---- Interactive Images (interactive_images_core profiles; DRAFT wording, pending the owner's approval) ----
 # The planner reply's JSON shape is part of the prompt (the user can edit it); Glossarion fills only the
-# {placeholders} and adds nothing else to the request.
+# {placeholders} and adds nothing else to the request. {image_subjects} is a line of its own that is removed
+# when its text is empty (the default Characters mode), so the default request reads as before.
 DEFAULT_INTERACTIVE_IMAGES_PLANNER_PROMPT = """You choose where illustrations go in a translated novel chapter.
 The chapter is below as numbered paragraphs, one per line: [n] text.
 Pick up to {images_per_chapter} moments worth illustrating.
+{image_subjects}
 Characters in this book:
 {character_names}
 Style classes you may assign to paragraphs:

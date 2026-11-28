@@ -200,7 +200,11 @@ def test_reference_slots_characters_round_robin_then_style():
     assert core.select_references(refs, ['b', 'A'], 2) == [('b', 'b1'), ('A', 'a1')]  # names match case-insensitively
     assert core.select_references(refs, [], 1) == [(None, 's1')]
     assert core.select_references(refs, ['A'], 0) == []
-    assert core.reference_list_text([('A', 'a1'), (None, 's1')], 'Image {n}: {name}') == "Image 1: A\nImage 2: art style"
+    # the art-style label is a placeholder text (core.placeholder_text 'style_reference'), never a word in code
+    assert core.reference_list_text([('A', 'a1'), (None, 's1')], 'Image {n}: {name}', 'art style') == \
+        "Image 1: A\nImage 2: art style"
+    assert core.reference_list_text([(None, 's1')], 'Image {n}: {name}', 'style') == "Image 1: style"
+    assert core.reference_list_text([(None, 's1')], 'Image {n}: {name}') == "Image 1: "
 
 
 def test_reference_capability_table():

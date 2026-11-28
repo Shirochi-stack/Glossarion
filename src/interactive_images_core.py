@@ -518,18 +518,29 @@ def chunk_image_share(max_images, chunk_len, total_len):
 # Placeholders (by name only; JSON braces in a prompt stay literal)
 # ---------------------------------------------------------------------------------------------
 
-PLANNER_PLACEHOLDERS = ('images_per_chapter', 'character_names', 'css_classes', 'chapter_title', 'paragraphs')
+PLANNER_PLACEHOLDERS = ('images_per_chapter', 'character_names', 'image_subjects', 'css_classes', 'chapter_title',
+                        'paragraphs')
 IMAGE_PLACEHOLDERS = ('scene_prompt', 'characters', 'reference_list')
 CSS_PLACEHOLDERS = ('user_request', 'css_classes')
 REFERENCE_LINE_PLACEHOLDERS = ('n', 'name')
+#: Placeholders whose template line is removed when they expand to nothing (the glossary placeholders'
+#: rule: an empty text removes the line), so the default "Characters" mode and a scene without characters
+#: leave no empty label behind.
+LINE_DROP_PLACEHOLDERS = ('image_subjects', 'characters')
 
 
-def fill_placeholders(template, values):
+def fill_placeholders(template, values, drop_empty=()):
     """``template`` with each ``{name}`` whose name is a key of ``values`` replaced by its value; every other
-    brace (JSON in the prompt) is left as it is. Nothing is added outside the placeholders."""
+    brace (JSON in the prompt) is left as it is. Nothing is added outside the placeholders. A line holding a
+    placeholder named in ``drop_empty`` whose value is empty is removed with its line break."""
     from prompt_defaults import PLACEHOLDER_RE
 
     text = str(template or '')
+    for name in drop_empty or ():
+        if name in values and str(values[name]) == '' and ('{' + name + '}') in text:
+            lines = text.split('\n')
+            kept = [line for line in lines if ('{' + name + '}') not in line]
+            text = '\n'.join(kept)
 
     def replace(match):
         name = match.group(1)
@@ -867,12 +878,13 @@ def select_references(refs, scene_characters, max_refs):
     return picked
 
 
-def reference_list_text(picked, line_template):
+def reference_list_text(picked, line_template, style_label=''):
     """``{reference_list}``: one line per attached reference from the editable line template
-    (``{n}``, ``{name}``; ``{name}`` is the character or "art style")."""
+    (``{n}``, ``{name}``; ``{name}`` is the character, or ``style_label`` -- the editable ``style_reference``
+    placeholder text -- for an art-style image). No fixed word is added here."""
     lines = []
     for index, (name, _path) in enumerate(picked, 1):
-        lines.append(fill_placeholders(line_template, {'n': index, 'name': name or 'art style'}))
+        lines.append(fill_placeholders(line_template, {'n': index, 'name': name or style_label}))
     return '\n'.join(lines)
 
 
@@ -892,12 +904,22 @@ DEFAULTS = {
     'interactive_images_planner_max_input_tokens': 0,
     'interactive_images_reference_line': 'Image {n}: {name}',
     'interactive_images_per_chapter': '1',
+    'interactive_images_include_gender': True,
+    'interactive_images_subjects': 'characters',
+    'interactive_images_aspect_choices': ['1:1', '3:4', '4:3', '16:9'],   # in ASPECT_CHOICES order
+    'interactive_images_placeholder_texts': {},
     'interactive_css_enabled': False,
     'interactive_css_preset': 'Classic Book',
 }
 
 RESOLUTIONS = ('1K', '2K', '4K')
-ASPECT_RATIOS = ('auto', '1:1', '3:4', '4:3', '2:3', '3:2', '9:16', '16:9')
+#: The ratios an image can have; ``auto`` = pick one at random from the ticked ``ASPECT_CHOICES``.
+ASPECT_CHOICES = ('1:1', '3:4', '4:3', '2:3', '3:2', '9:16', '16:9', '21:9')
+ASPECT_RATIOS = ('auto',) + ASPECT_CHOICES
+DEFAULT_ASPECT_CHOICES = tuple(DEFAULTS['interactive_images_aspect_choices'])
+#: What the planner may illustrate: characters (the default), backgrounds / scenery, or both.
+SUBJECTS = ('characters', 'backgrounds', 'both')
+SUBJECT_LABELS = {'characters': 'Characters', 'backgrounds': 'Backgrounds', 'both': 'Both'}
 #: The images-per-chapter dropdown (0 = styles only)
 PER_CHAPTER_CHOICES = tuple(str(n) for n in range(0, MAX_IMAGES_PER_CHAPTER + 1))
 
@@ -914,7 +936,21 @@ def settings_values(config):
         'interactive_images_aspect_ratio': s.aspect_ratio,
         'interactive_images_auto_after_translation': s.auto_after_translation,
         'interactive_images_recompile_after': s.recompile_after,
+        'interactive_images_include_gender': s.include_gender,
+        'interactive_images_subjects': s.subjects,
+        'interactive_images_aspect_choices': list(s.aspect_choices),
     }
+
+
+def coerce_aspect_choices(value):
+    """The ticked ratios as a list in :data:`ASPECT_CHOICES` order (unknown values dropped; a bad value = the
+    default selection; an empty list stays empty: Auto then leaves the ratio to the model)."""
+    if isinstance(value, str):
+        value = [part.strip() for part in re.split(r'[,;\s]+', value) if part.strip()]
+    if not isinstance(value, (list, tuple, set)):
+        return list(DEFAULT_ASPECT_CHOICES)
+    wanted = {str(item).strip() for item in value}
+    return [ratio for ratio in ASPECT_CHOICES if ratio in wanted]
 
 
 def coerce_setting(key, value):
@@ -925,12 +961,16 @@ def coerce_setting(key, value):
         except (TypeError, ValueError):
             return DEFAULTS[key]
     if key in ('interactive_images_auto_after_translation', 'interactive_images_recompile_after',
-               'interactive_css_enabled'):
+               'interactive_images_include_gender', 'interactive_css_enabled'):
         return _bool(value)
     if key == 'interactive_images_resolution':
         return value if value in RESOLUTIONS else DEFAULTS[key]
     if key == 'interactive_images_aspect_ratio':
         return value if value in ASPECT_RATIOS else DEFAULTS[key]
+    if key == 'interactive_images_subjects':
+        return value if value in SUBJECTS else DEFAULTS[key]
+    if key == 'interactive_images_aspect_choices':
+        return coerce_aspect_choices(value)
     return str(value or '').strip()
 
 
@@ -960,6 +1000,10 @@ class InteractiveImagesSettings:
     recompile_after: bool
     css_enabled: bool
     css_preset: str
+    include_gender: bool = True
+    subjects: str = 'characters'
+    aspect_choices: tuple = DEFAULT_ASPECT_CHOICES
+    placeholder_texts: dict = field(default_factory=dict)   # the stored expansion texts ({name: text})
 
 
 def _cfg(config, key):
@@ -1007,7 +1051,301 @@ def settings_from_config(config):
         recompile_after=_bool(_cfg(config, 'interactive_images_recompile_after')),
         css_enabled=_bool(_cfg(config, 'interactive_css_enabled')),
         css_preset=str(_cfg(config, 'interactive_css_preset') or 'Classic Book'),
+        include_gender=_bool(_cfg(config, 'interactive_images_include_gender')),
+        subjects=coerce_setting('interactive_images_subjects', _cfg(config, 'interactive_images_subjects')),
+        aspect_choices=tuple(coerce_aspect_choices(_cfg(config, 'interactive_images_aspect_choices'))),
+        placeholder_texts=stored_placeholder_texts(config),
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Placeholder texts (the user-editable expansions of the placeholders the step fills)
+# ---------------------------------------------------------------------------------------------
+#
+# Nothing the step sends to a model is written in code. Every sentence, label or word that reaches a request
+# comes from (a) the profile's own prompts or (b) one of the texts below, each of which the user can edit
+# (desktop: right-click a prompt editor > "Edit placeholder text...", mobile: Profile > Placeholder texts).
+# The stored overrides are ``{name: text}`` in ``interactive_images_placeholder_texts``; ``reference_line``
+# keeps its own older key. An empty text expands to nothing.
+
+PLACEHOLDER_TEXTS_KEY = 'interactive_images_placeholder_texts'
+REFERENCE_LINE_KEY = 'interactive_images_reference_line'
+
+_CHARACTER_GENDER_TEXT = '{name} ({gender})'
+_REFERENCE_LINE_TEXT = DEFAULTS[REFERENCE_LINE_KEY]
+_SUBJECT_TEXTS = {
+    'characters': '',
+    'backgrounds': ("Illustrate scenery and places only, with no characters in the picture: leave the "
+                    "characters list empty."),
+    'both': ("You may also pick scenery or establishing moments with no characters in them: leave the "
+             "characters list empty for those."),
+}
+
+
+def placeholder_text_defs():
+    """``[{'name', 'default', 'note'}]``: the editable placeholder texts, in editor order."""
+    return [
+        {'name': 'character_gender', 'default': _CHARACTER_GENDER_TEXT,
+         'note': ("How a character is written in {character_names} (planner) and {characters} (image prompt) "
+                  "when a gender is confidently known (Include gender on; the glossary and the Relations & "
+                  "Gender Tracker agree). Tokens: {name}, {gender}. Any other character is just the name. "
+                  "An empty text sends no gender.")},
+        {'name': 'gender_male', 'default': 'male',
+         'note': "The word {gender} stands for when the character is male."},
+        {'name': 'gender_female', 'default': 'female',
+         'note': "The word {gender} stands for when the character is female."},
+        {'name': 'image_subjects_characters', 'default': _SUBJECT_TEXTS['characters'],
+         'note': ("{image_subjects} in the planner prompt when Image subjects is Characters (the line is "
+                  "removed when this text is empty).")},
+        {'name': 'image_subjects_backgrounds', 'default': _SUBJECT_TEXTS['backgrounds'],
+         'note': "{image_subjects} in the planner prompt when Image subjects is Backgrounds."},
+        {'name': 'image_subjects_both', 'default': _SUBJECT_TEXTS['both'],
+         'note': "{image_subjects} in the planner prompt when Image subjects is Both."},
+        {'name': 'style_reference', 'default': 'art style',
+         'note': "{name} in a reference line for an art-style image (a character image uses the character's name)."},
+        {'name': 'reference_line', 'default': _REFERENCE_LINE_TEXT,
+         'note': ("One line of {reference_list} in the image prompt per attached reference image. "
+                  "Tokens: {n} (1, 2, ...), {name}.")},
+    ]
+
+
+#: The ``{tokens}`` a placeholder text may contain (the editors list them next to the text).
+PLACEHOLDER_TEXT_TOKENS = {'character_gender': ('name', 'gender'), 'reference_line': ('n', 'name')}
+
+
+def placeholder_default(name):
+    for item in placeholder_text_defs():
+        if item['name'] == name:
+            return item['default']
+    return ''
+
+
+def stored_placeholder_texts(config):
+    """The stored ``{name: text}`` overrides of an owner config (known names only; ``reference_line`` excluded)."""
+    stored = (config or {}).get(PLACEHOLDER_TEXTS_KEY)
+    if not isinstance(stored, dict):
+        return {}
+    known = {item['name'] for item in placeholder_text_defs()} - {'reference_line'}
+    return {str(k): v for k, v in stored.items() if str(k) in known and isinstance(v, str)}
+
+
+def placeholder_text(source, name):
+    """The text placeholder ``name`` expands to. ``source``: an :class:`InteractiveImagesSettings` or an owner
+    config (the stored text, else the built-in default)."""
+    settings = source if isinstance(source, InteractiveImagesSettings) else settings_from_config(source)
+    if name == 'reference_line':
+        return settings.reference_line
+    stored = settings.placeholder_texts.get(name)
+    return placeholder_default(name) if stored is None else stored
+
+
+def set_placeholder_text(config, name, text):
+    """Store ``text`` as placeholder ``name``'s text in ``config`` (a text equal to the default removes the
+    override). Returns True when the config changed."""
+    text = str(text if text is not None else '')
+    default = placeholder_default(name)
+    if name == 'reference_line':
+        before = config.get(REFERENCE_LINE_KEY)
+        config[REFERENCE_LINE_KEY] = text
+        return before != text
+    stored = dict(stored_placeholder_texts(config))
+    before = dict(stored)
+    if text == default:
+        stored.pop(name, None)
+    else:
+        stored[name] = text
+    config[PLACEHOLDER_TEXTS_KEY] = stored
+    return before != stored
+
+
+def subjects_text(settings):
+    """``{image_subjects}``: the editable text of the chosen Image subjects value."""
+    return placeholder_text(settings, 'image_subjects_' + settings.subjects)
+
+
+# ---------------------------------------------------------------------------------------------
+# Gender (glossary column + Relations & Gender Tracker), only when it is confident
+# ---------------------------------------------------------------------------------------------
+
+#: A gender change that the tracker records counts as dated only when each side has this many observations.
+DATED_CHANGE_MIN_OBSERVATIONS = 2
+
+
+def _gender_class(value):
+    """``'male'`` / ``'female'`` for a binary value (aliases resolved), ``'other'`` for any other stated value
+    (neutral, nonbinary, mixed, ...), ``''`` for blank / unknown."""
+    import gender_tracking as gt
+
+    gender = gt.normalize_gender(value)
+    if gender in gt.UNKNOWN_GENDERS:
+        return ''
+    return gender if gender in gt.BINARY_GENDERS else 'other'
+
+
+def _dated_gender(entry, chapter_number):
+    """The tracker's gender at ``chapter_number`` when the entry records ONE dated change (``male`` then
+    ``female`` or the reverse, each side seen at least :data:`DATED_CHANGE_MIN_OBSERVATIONS` times) and the
+    chapter is clearly on one side of it; '' otherwise (a flip-flop, a lone outlier, a chapter in the gap or
+    no chapter)."""
+    import gender_tracking as gt
+
+    try:
+        chapter = float(chapter_number)
+    except (TypeError, ValueError):
+        return ''
+    occurrences = sorted((pair for pair in gt.normalized_occurrences(entry)),
+                         key=lambda pair: gt.tracker_occurrence_sort_key(pair[0]))
+    runs = []   # [gender, count, first chapter number, last chapter number]
+    for occurrence, gender in occurrences:
+        try:
+            number = float(occurrence.get('chapter_num'))
+        except (TypeError, ValueError):
+            return ''
+        if runs and runs[-1][0] == gender:
+            runs[-1][1] += 1
+            runs[-1][3] = number
+        else:
+            runs.append([gender, 1, number, number])
+    if len(runs) != 2 or any(run[1] < DATED_CHANGE_MIN_OBSERVATIONS for run in runs):
+        return ''
+    first, second = runs
+    if chapter >= second[2]:
+        return second[0]
+    if chapter <= first[3]:
+        return first[0]
+    return ''
+
+
+def tracker_gender(entry, chapter_number=None):
+    """``(gender, conflict)`` of one gender-tracker entry: the user's decision when it is male / female; the
+    one gender seen when only one was; the gender at ``chapter_number`` when exactly one dated change is
+    recorded and the data is unambiguous; otherwise ``('', True)`` (both seen without a clear dated change,
+    or a non-binary value mixed with a binary one). No entry / nothing seen = ``('', False)``."""
+    import gender_tracking as gt
+
+    if not isinstance(entry, dict):
+        return '', False
+    decision = gt.normalized_decision(entry)
+    if decision in gt.BINARY_GENDERS:
+        return decision, False
+    counts = gt.gender_counts(entry)
+    male, female = counts.get('male', 0), counts.get('female', 0)
+    other = sum(count for gender, count in counts.items() if gender not in gt.BINARY_GENDERS)
+    if other and (male or female):
+        return '', True
+    if male and female:
+        dated = _dated_gender(entry, chapter_number)
+        return (dated, False) if dated else ('', True)
+    if male:
+        return 'male', False
+    if female:
+        return 'female', False
+    return '', False
+
+
+def confident_gender(glossary_genders, tracker_entries=(), chapter_number=None):
+    """``'male'`` / ``'female'`` when the gender of ONE character is confidently known, else ``''``.
+
+    The rule (the point is to avoid a wrong gender: a missing one only costs a hint):
+
+    * ``glossary_genders``: the gender cells of every glossary row of this character. A stated non-binary value
+      (neutral, nonbinary, mixed ...) or rows that disagree = no gender. Blank / unknown = no claim.
+    * ``tracker_entries``: the gender-tracker entries of the same character (matched by exact raw name only).
+      A conflict (both genders seen without one clear dated change at ``chapter_number``, see
+      :func:`tracker_gender`) = no gender, whatever the glossary says.
+    * glossary and tracker both claim: they must agree, else no gender. One claims and the other has nothing
+      against it: that claim. Neither: no gender.
+    """
+    classes = {_gender_class(value) for value in glossary_genders or ()} - {''}
+    if 'other' in classes or len(classes) > 1:
+        return ''
+    glossary_claim = next(iter(classes)) if classes else ''
+    claims = set()
+    for entry in tracker_entries or ():
+        claim, conflict = tracker_gender(entry, chapter_number)
+        if conflict:
+            return ''
+        if claim:
+            claims.add(claim)
+    if len(claims) > 1:
+        return ''
+    tracker_claim = next(iter(claims)) if claims else ''
+    if glossary_claim and tracker_claim and glossary_claim != tracker_claim:
+        return ''
+    return glossary_claim or tracker_claim
+
+
+def load_gender_tracker(output_dir, glossary_path=None):
+    """The book's gender tracker (``<glossary stem>_gender_tracker.json``; its entries are keyed by the raw
+    name), ``{}`` when there is none."""
+    path = glossary_path or find_book_glossary(output_dir)
+    if not path:
+        return {}
+    try:
+        import gender_tracking as gt
+
+        data = gt.read_json_file(gt.tracker_path_for_glossary(path))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def character_genders(entries, tracker, chapter_number=None):
+    """``{display name: 'male' | 'female'}`` for the glossary's characters whose gender is confident
+    (:func:`confident_gender`). Rows sharing a display name are one character (their cells must agree); a
+    tracker entry is matched by the row's raw name, never by a similar name."""
+    import gender_tracking as gt
+
+    rows = {}
+    for entry in entries or ():
+        kind = str(entry.get('type', '') or '').lower()
+        if kind and not kind.startswith('char'):
+            continue
+        name = _norm_space(entry.get('translated_name') or entry.get('raw_name'))
+        if not name:
+            continue
+        genders, trackers = rows.setdefault(name, ([], []))
+        genders.append(entry.get('gender'))
+        found = gt.tracker_entry_for_raw(tracker, entry.get('raw_name'))
+        if found is not None and all(found is not other for other in trackers):
+            trackers.append(found)
+    out = {}
+    for name, (genders, trackers) in rows.items():
+        gender = confident_gender(genders, trackers, chapter_number)
+        if gender:
+            out[name] = gender
+    return out
+
+
+def format_character(name, gender, settings):
+    """The character as the planner / image prompt lists it: the ``character_gender`` placeholder text with
+    ``{name}`` and ``{gender}`` (the ``gender_male`` / ``gender_female`` text) when ``gender`` is known and
+    Include gender is on, else just the name."""
+    if not gender or not settings.include_gender:
+        return name
+    fmt = placeholder_text(settings, 'character_gender')
+    label = placeholder_text(settings, 'gender_' + gender)
+    if not fmt.strip() or not label.strip():
+        return name
+    return fill_placeholders(fmt, {'name': name, 'gender': label})
+
+
+def pick_aspect_ratio(settings, chapter_number, index):
+    """The ratio of image ``index`` (1-based) of chapter ``chapter_number``: the fixed ratio, or -- with Auto --
+    one of the ticked ratios chosen pseudo-randomly from a hash of ``chapter:index`` (stable across reruns of
+    the same chapter, different between images). '' = send no ratio (Auto with nothing ticked)."""
+    ratio = str(settings.aspect_ratio or '')
+    if ratio != 'auto':
+        return ratio if ratio in ASPECT_CHOICES else ''
+    choices = list(settings.aspect_choices or ())
+    if not choices:
+        return ''
+    try:
+        chapter = int(chapter_number)
+    except (TypeError, ValueError):
+        chapter = 0
+    digest = hashlib.sha256(f"{chapter}:{int(index)}".encode('ascii')).digest()
+    return choices[int.from_bytes(digest[:4], 'big') % len(choices)]
 
 
 # ---------------------------------------------------------------------------------------------

@@ -64,10 +64,22 @@ def _default_client_factory(kind, model, config, output_dir):
         client._force_image_output_mode = True
         settings = core.settings_from_config(config)
         client._forced_image_output_resolution = settings.resolution
-        if settings.aspect_ratio and settings.aspect_ratio != 'auto':
-            client._forced_image_output_aspect_ratio = settings.aspect_ratio
+        # the aspect ratio is set per image (``_set_image_aspect``: the fixed ratio, or one picked by Auto)
         client._suppress_custom_image_edit_endpoint = True
+    else:
+        # a text request (planner, CSS): the main tab's Output mode (image / video) must not turn it into an
+        # image request, which would also send it to the Image Gen / Edit key pool
+        client._text_output_only = True
     return client
+
+
+def _set_image_aspect(client, ratio):
+    """The ratio the next image request asks for (the API parameter ``UnifiedClient`` reads as
+    ``_forced_image_output_aspect_ratio``); '' = none, the model decides."""
+    try:
+        client._forced_image_output_aspect_ratio = ratio or None
+    except Exception:
+        pass
 
 
 def configure_image_key_pool(config, log):
@@ -210,17 +222,19 @@ def build_planner_prompts(settings, blocks, title, names, css_classes, *, budget
     values = {
         'images_per_chapter': settings.per_chapter,
         'character_names': '\n'.join(names),
+        'image_subjects': core.subjects_text(settings),
         'css_classes': '\n'.join(css_classes),
         'chapter_title': title,
     }
-    overhead = count_tokens(core.fill_placeholders(settings.planner_prompt, dict(values, paragraphs='')))
+    drop = core.LINE_DROP_PLACEHOLDERS
+    overhead = count_tokens(core.fill_placeholders(settings.planner_prompt, dict(values, paragraphs=''), drop))
     chunks = core.chunk_blocks(blocks, budget, count_tokens, overhead)
     out = []
     for chunk in chunks:
         share = settings.per_chapter if len(chunks) == 1 else core.chunk_image_share(
             settings.per_chapter, len(chunk), len(blocks))
         prompt = core.fill_placeholders(settings.planner_prompt, dict(
-            values, images_per_chapter=share, paragraphs=core.format_paragraphs(chunk)))
+            values, images_per_chapter=share, paragraphs=core.format_paragraphs(chunk)), drop)
         out.append((prompt, chunk, share))
     return out
 
@@ -288,6 +302,7 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
     entries = core.load_glossary_entries(output_dir)
     name_map = core.glossary_name_map(entries)
     names = core.character_names(entries)
+    tracker = core.load_gender_tracker(output_dir) if settings.include_gender else {}
     refs = core.load_references(output_dir)
     max_refs = core.effective_reference_count(image_model, settings.max_references)
     if wants_images and core.reference_limit(image_model) == 0:
@@ -325,8 +340,8 @@ def run_interactive_images(config, output_dir, keys=None, *, log=None, stop_even
             if wants_images and image_client is None:
                 image_client = client_factory('image', image_model, config, output_dir)
             status = _run_chapter(config, settings, output_dir, path, chapter, text_client, image_client,
-                                  text_model, image_model, css_classes, names, name_map, refs, max_refs,
-                                  count_tokens, budget, stop_event, log, on_progress)
+                                  text_model, image_model, css_classes, (names, entries, tracker), name_map, refs,
+                                  max_refs, count_tokens, budget, stop_event, log, on_progress)
         except _Stop:
             ipc.set_status(path, chapter.key, 'pending', 'stopped')
             result.stopped = True
@@ -382,7 +397,12 @@ def _check_stop(stop_event):
 
 
 def _run_chapter(config, settings, output_dir, path, chapter, text_client, image_client, text_model, image_model,
-                 css_classes, names, name_map, refs, max_refs, count_tokens, budget, stop_event, log, on_progress):
+                 css_classes, characters, name_map, refs, max_refs, count_tokens, budget, stop_event, log,
+                 on_progress):
+    names, entries, tracker = characters
+    # confident genders at this chapter (glossary + gender tracker), written through the editable placeholder text
+    genders = core.character_genders(entries, tracker, chapter.number) if settings.include_gender else {}
+    planner_names = [core.format_character(name, genders.get(name), settings) for name in names]
     with open(chapter.path, 'r', encoding='utf-8') as handle:
         original = handle.read()
     base = core.strip_injections(original)
@@ -399,11 +419,15 @@ def _run_chapter(config, settings, output_dir, path, chapter, text_client, image
     # 1. plan
     title = core.chapter_title(base, chapter.title or chapter.key)
     plans = []
-    for prompt, chunk, share in build_planner_prompts(settings, blocks, title, names, css_classes,
+    for prompt, chunk, share in build_planner_prompts(settings, blocks, title, planner_names, css_classes,
                                                       budget=budget, count_tokens=count_tokens):
         _check_stop(stop_event)
         reply = _send(text_client, _messages('', prompt), config, PLAN_CONTEXT)
         plans.append(core.parse_plan(reply, len(blocks), css_classes, share, glossary_names=name_map))
+    if settings.subjects == 'backgrounds':
+        for plan in plans:   # Backgrounds only: a scene has no characters, whatever the model listed
+            for item in plan.images:
+                item.characters, item.matched = [], {}
     plan = core.merge_plans(plans, settings.per_chapter)
     for warning in plan.warnings:
         log(f"ℹ️ {chapter.key}: {warning}")
@@ -447,13 +471,18 @@ def _run_chapter(config, settings, output_dir, path, chapter, text_client, image
         try:
             _check_stop(stop_event)
             scene = [item.matched.get(name, name) for name in item.characters]
+            record['scene'] = scene
             picked = core.select_references(refs, scene, max_refs)
             record['refs'] = [rel for _name, rel in picked]
+            ratio = core.pick_aspect_ratio(settings, chapter.number, k)
+            record['aspect_ratio'] = ratio
+            _set_image_aspect(image_client, ratio)
             user_text = core.fill_placeholders(settings.image_prompt, {
                 'scene_prompt': item.prompt,
-                'characters': ', '.join(scene),
-                'reference_list': core.reference_list_text(picked, settings.reference_line),
-            })
+                'characters': ', '.join(core.format_character(name, genders.get(name), settings) for name in scene),
+                'reference_list': core.reference_list_text(picked, settings.reference_line,
+                                                           core.placeholder_text(settings, 'style_reference')),
+            }, core.LINE_DROP_PLACEHOLDERS)
             content = [{'type': 'text', 'text': user_text}]
             for _name, rel in picked:
                 full = os.path.join(folder, rel)
