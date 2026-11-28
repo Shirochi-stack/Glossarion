@@ -8219,18 +8219,14 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             if key is None or not (len(dialog._pm_files) == 1 or str(key).lower().endswith('.epub')):
                 _set_tab_count('glossary')
                 return
+            stats = dialog._pm_glossary_counts.get(_pm_file_key(key))  # the built panel's live legend
             provider = dialog._pm_glossary_count_providers.get(_pm_file_key(key))
-            stats = None
-            if callable(provider):
+            if not isinstance(stats, dict) and callable(provider):
                 try:
-                    stats = provider()  # None: this file has no glossary progress
+                    stats = provider()  # None: no glossary progress (or its count is still being built)
                 except Exception as exc:
                     print(f"\u26a0\ufe0f Glossary tab count failed: {exc}")
                     stats = None
-            if stats is not None:
-                reported = dialog._pm_glossary_counts.get(_pm_file_key(key))
-                if isinstance(reported, dict):
-                    stats = reported  # the built panel's live legend
             total = stats.get('total', 0) if isinstance(stats, dict) else 0
             done = stats.get('completed', 0) if isinstance(stats, dict) else 0
             _set_tab_count('glossary', f"{done}/{total}" if total else None)
@@ -12263,20 +12259,35 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             return _build_gp_empty_panel(file_path, parent_widget)
 
         _gp_count_cache = {}
+        _gp_count_jobs = set()
 
         def _gp_count_stats():
             """This file's legend numbers from its progress file, without building the
-            panel (the panel's own model; cached while the file and the clock hold)."""
+            panel (the panel's own model). Never blocks the UI: the model is rebuilt on a
+            worker thread when the progress file changes (or after 30 s), and the Progress
+            Manager's count timer shows the new numbers on its next tick. None until the
+            first build finishes, and when the file has no glossary progress."""
             gp = _find_gp_for_file(file_path)
             if not gp or not os.path.isfile(gp):
                 return None
             signature = glossary_progress_signature(gp)
             cached = _gp_count_cache.get(gp)
-            if cached and cached[0] == signature and time.time() - cached[1] < 10:
-                return cached[2]
-            stats = glossary_progress_legend_stats(self, file_path, gp, **_gp_model_kwargs())
-            _gp_count_cache[gp] = (signature, time.time(), stats)
-            return stats
+            fresh = bool(cached) and cached[0] == signature and time.time() - cached[1] < 30
+            if not fresh and gp not in _gp_count_jobs:
+                _gp_count_jobs.add(gp)
+                kwargs = _gp_model_kwargs()
+
+                def _build_count():
+                    try:
+                        stats = glossary_progress_legend_stats(self, file_path, gp, **kwargs)
+                    except Exception as exc:
+                        print(f"⚠️ Glossary tab count failed: {exc}")
+                        stats = cached[2] if cached else None
+                    _gp_count_cache[gp] = (signature, time.time(), stats)
+                    _gp_count_jobs.discard(gp)
+
+                threading.Thread(target=_build_count, name="glossary-tab-count", daemon=True).start()
+            return cached[2] if cached else None
 
         def _show_glossary_progress():
             """Show glossary extraction progress on the Progress Manager's Glossary tab."""
