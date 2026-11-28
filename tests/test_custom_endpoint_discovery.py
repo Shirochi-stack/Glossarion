@@ -198,7 +198,12 @@ def test_no_hit_lists_what_was_tried(provider):
     p = provider(good_prefix=None)
     result = ced.discover_endpoint("http://127.0.0.1:%d/api" % p.port, "/chat/completions", KEY)
     assert result.found is None
-    assert [c for c, _s in result.tried] == ["http://127.0.0.1:%d/api/v1" % p.port]
+    tried = [c for c, _s in result.tried]
+    assert tried[0] == "http://127.0.0.1:%d/api/v1" % p.port  # the route's own type: candidate bases first
+    assert result.found_endpoint is None
+    # then the other text endpoint types, on the current base and its candidates
+    assert "http://127.0.0.1:%d/api/v1/messages" % p.port in tried
+    assert "http://127.0.0.1:%d/api/v1/chat/completions" % p.port in tried
 
 
 def test_a_current_url_that_answers_is_not_searched(provider):
