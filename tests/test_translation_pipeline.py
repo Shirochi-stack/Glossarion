@@ -391,6 +391,17 @@ WORKER_EDITS = [
      "                                    os.environ[key] = val\n"
      "                        return False\n"
      "\n", 1),
+    # 2026-11-27: Interactive Images runs as its own step after a finished run (off by default;
+    # interactive_images_auto_after_translation), before the post-translation QA scan
+    ("            # Post-translation scanning phase\n",
+     "            # Interactive Images: its own step after a finished run (interactive_images_runner; a failure only logs)\n"
+     "            try:\n"
+     "                from interactive_images_runner import run_after_translation\n"
+     "                run_after_translation(self, bool(translation_completed) and not self.stop_requested)\n"
+     "            except Exception as e:\n"
+     "                self.append_log(f\"⚠️ Interactive Images after translation failed: {e}\")\n"
+     "            \n"
+     "            # Post-translation scanning phase\n", 1),
 ]
 #: U3 fix pass: the set-up's Library raw-input registry write is the _record_library_raw_inputs
 #: hook (TranslatorGUI's override keeps the epub_library import; the GUI-free default skips it)

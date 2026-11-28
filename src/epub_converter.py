@@ -107,6 +107,15 @@ def _is_forbidden_epub_source_path(path: str, output_dir: str) -> bool:
     )
 
 
+def _is_interactive_image_src(src: str) -> bool:
+    """Whether an image src names an Interactive Images file (interactive_images_core)."""
+    try:
+        from interactive_images_core import is_interactive_image_src
+        return is_interactive_image_src(src)
+    except Exception:
+        return False
+
+
 def _norm_abs_path(path: str) -> str:
     """Return a normalized absolute path key for loose path comparisons."""
     try:
@@ -3104,7 +3113,9 @@ class EPUBCompiler:
             
             # Add CSS
             css_items = self._add_css_files(book)
-            
+            # Interactive styles (Interactive_Images/glossarion_interactive.css): linked after every other sheet
+            self._add_interactive_stylesheet(book, css_items)
+
             # Check stop flag
             if self.is_stopped():
                 self.log("🛑 EPUB converter stopped by user")
@@ -3227,6 +3238,8 @@ class EPUBCompiler:
                 cover_file_for_generated_page,
                 protected_cover_file=cover_file,
             )
+            # Interactive Images (Interactive_Images/Glossarion_*): their own folder, never renamed
+            self._add_interactive_images(book)
 
             # A reused page or disabled synthetic-page setting must not discard
             # the OPF cover-image metadata used by reader/library thumbnails.
@@ -4123,7 +4136,10 @@ class EPUBCompiler:
                     
                     if self.attach_css_to_chapters:
                         self._attach_css_items_to_document(chapter, css_items)
-                    
+                    else:
+                        # the interactive styles are linked whenever the book has them
+                        self._attach_css_items_to_document(chapter, self._interactive_css_items(css_items))
+
                     # Add to book
                     book.add_item(chapter)
                     spine.append(chapter)
@@ -4898,7 +4914,10 @@ class EPUBCompiler:
                 self._attach_css_items_to_document(chapter, css_items)
                 if is_problem_chapter:
                     self.log(f"[DEBUG] Attached {len(css_items)} CSS files")
-            
+            else:
+                # the interactive styles are linked whenever the book has them
+                self._attach_css_items_to_document(chapter, self._interactive_css_items(css_items))
+
             # Add to book
             book.add_item(chapter)
             spine.append(chapter)
@@ -5701,7 +5720,86 @@ img {
                 self.log(f"[WARNING] Failed to add CSS {css_file}: {e}")
         
         return css_items
-    
+
+    def _add_interactive_stylesheet(self, book: epub.EpubBook, css_items: List[epub.EpubItem]) -> None:
+        """Add the book's interactive stylesheet (Interactive_Images/glossarion_interactive.css) as its own
+        item, last in ``css_items`` so chapters link it after the user's CSS. It lives outside ``css/``, so
+        the override sync above and Load CSS / Clear never delete it."""
+        try:
+            from interactive_css_presets import book_stylesheet_path, STYLESHEET_FILENAME
+            path = book_stylesheet_path(self.output_dir)
+            if self._is_image_passthrough() or not os.path.isfile(path):
+                return
+            with open(path, 'r', encoding='utf-8') as f:
+                css_content = f.read()
+            item = epub.EpubItem(
+                uid="css_glossarion_interactive",
+                file_name=f"css/{STYLESHEET_FILENAME}",
+                media_type="text/css",
+                content=FileUtils.ensure_bytes(css_content)
+            )
+            book.add_item(item)
+            css_items.append(item)
+            self.log(f"✅ Added interactive styles: {STYLESHEET_FILENAME}")
+        except Exception as e:
+            self.log(f"[WARNING] Failed to add the interactive stylesheet: {e}")
+
+    @staticmethod
+    def _interactive_css_items(css_items: List[epub.EpubItem]) -> List[epub.EpubItem]:
+        """The interactive stylesheet item of ``css_items`` (``[]`` when the book has none)."""
+        return [item for item in css_items if getattr(item, 'id', None) == "css_glossarion_interactive"]
+
+    def _interactive_image_files(self) -> List[str]:
+        """Glossarion_* images of Interactive_Images/ that some chapter file references."""
+        try:
+            from interactive_images_core import GENERATED_IMAGE_RE, interactive_dir
+            folder = interactive_dir(self.output_dir)
+            if not os.path.isdir(folder):
+                return []
+            names = [n for n in os.listdir(folder)
+                     if GENERATED_IMAGE_RE.match(n) and os.path.isfile(os.path.join(folder, n))]
+            if not names:
+                return []
+            referenced = set()
+            for fname in os.listdir(self.output_dir):
+                if not fname.lower().endswith(('.html', '.xhtml', '.htm')):
+                    continue
+                try:
+                    with open(os.path.join(self.output_dir, fname), 'r', encoding='utf-8', errors='ignore') as f:
+                        text = f.read()
+                except OSError:
+                    continue
+                if 'Glossarion_' in text:
+                    referenced.update(n for n in names if n in text)
+            return sorted(referenced)
+        except Exception as e:
+            self.log(f"[WARNING] Could not list interactive images: {e}")
+            return []
+
+    def _add_interactive_images(self, book: epub.EpubBook) -> None:
+        """Add the referenced Interactive_Images/Glossarion_* files under their own folder (no rename map)."""
+        from interactive_images_core import INTERACTIVE_FOLDER, interactive_dir
+        names = self._interactive_image_files()
+        if not names:
+            return
+        folder = interactive_dir(self.output_dir)
+        added = 0
+        for name in names:
+            try:
+                ctype, _ = mimetypes.guess_type(name)
+                with open(os.path.join(folder, name), 'rb') as f:
+                    content = f.read()
+                book.add_item(epub.EpubItem(
+                    uid=f"glx_{os.path.splitext(name)[0]}",
+                    file_name=f"{INTERACTIVE_FOLDER}/{name}",
+                    media_type=ctype or "image/png",
+                    content=content
+                ))
+                added += 1
+            except Exception as e:
+                self.log(f"[WARNING] Failed to add interactive image {name}: {e}")
+        self.log(f"🖼 Added {added} interactive image(s)")
+
     def _font_basename_from_css_url(self, url_val: str) -> str:
         """Return a normalized font filename from a CSS url(...) value."""
         try:
@@ -6476,12 +6574,26 @@ img {
                     continue
                 
                 total_images += 1
-                
+
                 # Get the base filename - handle various path formats
                 # Remove query parameters first
                 clean_src = src.split('?')[0]
                 basename = os.path.basename(clean_src)
-                
+
+                # Interactive Images keep their own folder: never the rename map or a stem match
+                if _is_interactive_image_src(clean_src):
+                    from interactive_images_core import INTERACTIVE_FOLDER
+                    glx_prefix = "../" if getattr(self, 'legacy_epub_structure', False) else ""
+                    new_src = f"{glx_prefix}{INTERACTIVE_FOLDER}/{basename}"
+                    if src != new_src:
+                        img['src'] = new_src
+                        changed = True
+                    found_images += 1
+                    if not img.get('alt'):
+                        img['alt'] = ''
+                        changed = True
+                    continue
+
                 # Look up the safe name
                 if basename in processed_images:
                     safe_name = processed_images[basename]
@@ -9218,7 +9330,15 @@ img {
                         # Also index without extension for flexible matching
                         base = os.path.splitext(fname)[0]
                         images_by_name[base] = (fpath, ctype)
-        
+        # Interactive Images (Interactive_Images/Glossarion_*): unique names, looked up like the rest
+        for fname in self._interactive_image_files():
+            fpath = os.path.join(self.output_dir, 'Interactive_Images', fname)
+            ctype, _ = mimetypes.guess_type(fpath)
+            ctype = ctype or _mime_fallback.get(os.path.splitext(fname)[1].lower())
+            if ctype:
+                images_by_name[fname] = (fpath, ctype)
+                images_by_name[os.path.splitext(fname)[0]] = (fpath, ctype)
+
         def _read_image_as_pdf_compatible(fpath, ctype):
             """Read image bytes, converting webp to JPEG/PNG since WeasyPrint does not support webp.
             When ENABLE_IMAGE_COMPRESSION is off, converts to lossless PNG to avoid quality loss.
@@ -9404,7 +9524,16 @@ img {
                             styles += f.read() + "\n"
                     except Exception:
                         pass
-        
+        # Interactive styles after the book's own CSS (Interactive_Images/glossarion_interactive.css)
+        try:
+            from interactive_css_presets import book_stylesheet_path
+            _glx_css = book_stylesheet_path(self.output_dir)
+            if os.path.isfile(_glx_css):
+                with open(_glx_css, 'r', encoding='utf-8') as f:
+                    styles += f.read() + "\n"
+        except Exception:
+            pass
+
         # Override any @page rules from EPUB CSS that may set margin: 0 (which clips page number footers)
         styles += " @page { margin: 15mm; } "
 

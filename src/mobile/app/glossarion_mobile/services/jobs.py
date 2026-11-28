@@ -424,6 +424,8 @@ class JobKind(str, enum.Enum):
     # U9
     MD_TXT_SIDECARS = "md_txt_sidecars"
     BR_TO_PARAGRAPHS = "br_to_paragraphs"
+    # Interactive Images (the step after translation)
+    INTERACTIVE_IMAGES = "interactive_images"
 
 
 class JobState(str, enum.Enum):
@@ -671,7 +673,7 @@ def job_target(spec: Any) -> Optional[JobTarget]:
 #: Kinds whose job works on books (``job_books``): one of them queued or running replaces its books' ended entries.
 BOOK_JOB_KINDS = frozenset(JOB_FAMILIES) | {
     "retranslate", "resolve_qa", "compile_epub", "compile_pdf", "metadata", "translate_headers", "validate_epub",
-    "rename_outputs", "md_txt_sidecars", "br_to_paragraphs",
+    "rename_outputs", "md_txt_sidecars", "br_to_paragraphs", "interactive_images",
 }
 
 

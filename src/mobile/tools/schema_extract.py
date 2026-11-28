@@ -142,6 +142,8 @@ DIALOG_MODULES = (                           # label / tooltip / UI-site priorit
     # Scanner's bulk scan loop and the main window's "Translate Headers Now" worker
     "qa_scan_runtime.py",
     "translate_headers_standalone.py",
+    # Interactive Images: the settings dialog and the Other Settings rows (EPUB section, under Attach CSS)
+    "interactive_images_gui.py",
 )
 EXTRA_MODULES = ("qa_scan_runtime.py", "ai_hunter_enhanced.py", "metadata_defaults.py",
                  "manga_settings_defaults.py")
@@ -357,6 +359,8 @@ UI_SITE_ROOTS = (
     ("multi_api_key_manager.py", "*", "keys"),
     # U7: other_settings' "Translate Headers Now" worker (prompt management section)
     ("translate_headers_standalone.py", "run_translate_headers_now", "other.meta_data"),
+    # Interactive Images settings dialog + the "Interactive styles" rows of the EPUB section
+    ("interactive_images_gui.py", "*", "other.meta_data"),
 )
 UI_REACH_DEPTH = 3
 #: Read the live values for the placeholder hover tooltips (qt_widget_helpers.link_placeholders): they show

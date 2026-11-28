@@ -318,6 +318,11 @@ app_files = [
     ('progress_core.py', '.'),
     ('progress_actions.py', '.'),
     ('glossary_progress_core.py', '.'),
+    ('interactive_css_presets.py', '.'),
+    ('interactive_images_core.py', '.'),
+    ('interactive_images_progress_core.py', '.'),
+    ('interactive_images_runner.py', '.'),
+    ('interactive_images_gui.py', '.'),
     # Mobile rewrite U6: the Glossary Editor document, the main window's glossary file actions and the
     # Parallel EPUB pair core (GlossaryManager_GUI, translator_gui and parallel_epub_glossary import them)
     ('glossary_document.py', '.'),
@@ -571,6 +576,11 @@ app_modules = [
     'progress_core',
     'progress_actions',
     'glossary_progress_core',
+    'interactive_css_presets',
+    'interactive_images_core',
+    'interactive_images_progress_core',
+    'interactive_images_runner',
+    'interactive_images_gui',
     # Mobile rewrite U6: the Glossary Editor document, the main window's glossary file actions and the
     # Parallel EPUB pair core (GlossaryManager_GUI, translator_gui and parallel_epub_glossary import them)
     'glossary_document',

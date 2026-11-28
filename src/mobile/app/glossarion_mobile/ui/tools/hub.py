@@ -54,6 +54,8 @@ HUB_GROUPS = (
     )),
     ("Images", (
         ToolTile("tools.manga", "Manga translator", "AUTO_STORIES", "tools.manga"),
+        # illustrations + interactive styles for translated books (a step after translation)
+        ToolTile("tools.interactive-images", "Interactive Images", "IMAGE", "tools.interactive-images"),
     )),
     ("Files", (
         ToolTile("tools.files", "File browser", "FOLDER_OPEN", "tools.files", params={"root": "output"}),

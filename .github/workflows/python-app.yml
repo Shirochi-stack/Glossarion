@@ -119,6 +119,15 @@ jobs:
           tests/test_glossary_joined_rows.py \
           tests/test_missing_tag_bracket.py \
           tests/test_glossary_progress_core.py \
+          tests/test_progress_manager_window.py \
+          tests/test_interactive_images_core.py \
+          tests/test_interactive_images_progress_core.py \
+          tests/test_interactive_css_presets.py \
+          tests/test_interactive_images_epub.py \
+          tests/test_interactive_images_gui.py \
+          tests/test_interactive_images_round2.py \
+          tests/test_interactive_images_routing.py \
+          tests/test_interactive_images_batch.py \
           tests/test_glossary_special_rows.py \
           tests/test_image_glossary_header_only.py \
           tests/test_glossary_document.py \

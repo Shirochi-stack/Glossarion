@@ -3838,55 +3838,10 @@ _GLOSSARY_STRUCTURAL_SKIP_STATUSES = {
 }
 
 
-def _classify_glossary_html_document(raw_html) -> Dict[str, str]:
-    """Extract text while identifying documents that need no glossary request."""
-    soup = BeautifulSoup(raw_html or b"", "html.parser")
-    for tag in soup.find_all(["script", "style", "noscript", "template"]):
-        tag.decompose()
-
-    text = soup.get_text("\n", strip=True)
-    has_images = bool(soup.find(["img", "image"]))
-
-    content_soup = BeautifulSoup(str(soup), "html.parser")
-    for tag in content_soup.find_all(["title", "h1", "h2", "h3", "h4", "h5", "h6"]):
-        tag.decompose()
-    remaining_text = content_soup.get_text("\n", strip=True)
-
-    if has_images and not remaining_text:
-        structural_kind = "image_only"
-    elif text and not remaining_text:
-        structural_kind = "title_header_only"
-    elif not text:
-        structural_kind = "empty"
-    else:
-        structural_kind = ""
-
-    return {
-        "text": text,
-        "structural_kind": structural_kind,
-    }
-
-
-def _glossary_structural_progress_statuses(
-    chapter_kinds,
-    *,
-    skip_title_header_only=True,
-):
-    """Map structural EPUB classifications to distinct skip statuses."""
-    statuses = {}
-    for raw_idx, raw_kind in (chapter_kinds or {}).items():
-        try:
-            idx = int(raw_idx)
-        except (TypeError, ValueError):
-            continue
-        kind = str(raw_kind or "").strip().lower()
-        if kind == "image_only":
-            statuses[idx] = "skipped_image_only"
-        elif kind == "empty":
-            statuses[idx] = "skipped_empty"
-        elif kind == "title_header_only" and skip_title_header_only:
-            statuses[idx] = "skipped_title_header_only"
-    return statuses
+from epub_special_files import (  # noqa: E402  (one definition, shared with Interactive Images)
+    classify_glossary_html_document as _classify_glossary_html_document,
+    glossary_structural_progress_statuses as _glossary_structural_progress_statuses,
+)
 
 
 # Bump when text extraction, document ordering, or structural classification changes.

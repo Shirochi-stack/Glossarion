@@ -194,7 +194,9 @@ from glossary_progress_core import (  # noqa: F401 -- moved in U5; re-exported f
     _normalize_glossary_refinement_selection,
     _parallel_glossary_progress_filename_aliases,
     finish_manual_glossary_refinement,
+    glossary_progress_legend_stats,
     glossary_progress_locator,
+    glossary_progress_signature,
     make_glossary_progress_model,
     prepare_manual_glossary_refinement,
     run_manual_glossary_refinement,
@@ -429,6 +431,99 @@ class _GlossaryProgressAsyncBridge(QObject):
     def _handle_failed(self, message):
         if callable(self._on_failed):
             self._on_failed(message)
+
+
+def _pm_file_key(path):
+    """The Progress Manager window's key for one entry of its file dropdown."""
+    return os.path.normcase(os.path.abspath(str(path or "")))
+
+
+class _ProgressWindowEventFilter(QObject):
+    """Tells the Progress Manager window when it is shown or hidden, so the current tab can
+    start or stop its live refresh (the window's own showEvent is patched by the pages)."""
+
+    def __init__(self, on_visibility, parent=None):
+        super().__init__(parent)
+        self._on_visibility = on_visibility
+
+    def eventFilter(self, obj, event):
+        try:
+            kind = event.type()
+            if kind == QEvent.Show:
+                self._on_visibility(True)
+            elif kind == QEvent.Hide:
+                self._on_visibility(False)
+        except Exception:
+            pass
+        return False
+
+
+class _OneLineTitleLabel(QLabel):
+    """A title that stays on one line while the row has room and wraps, instead of
+    being clipped, when a large GUI Font Scale makes the row too narrow."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+
+    def sizeHint(self):
+        self.ensurePolished()
+        margins = self.contentsMargins()
+        width = (self.fontMetrics().horizontalAdvance(self.text())
+                 + margins.left() + margins.right() + 2)
+        return QSize(width, self.heightForWidth(width))
+
+
+class _DropdownNotebook:
+    """Thin adapter so ``addTab()`` works the same as QTabWidget: the page goes into the
+    Progress Manager window's Translation stack and its label into the shared file dropdown."""
+
+    def __init__(self, window):
+        self._window = window
+
+    def addTab(self, widget, label, key=None):
+        self._window._pm_add_file(key if key is not None else label, label, widget)
+
+    def currentIndex(self):
+        return self._window._pm_file_combo.currentIndex()
+
+    def setCurrentIndex(self, idx):
+        self._window._pm_file_combo.setCurrentIndex(idx)
+
+
+_PM_TABS_STYLE = """
+    QTabWidget::pane {
+        border: 1px solid #4a5568;
+        border-radius: 4px;
+        top: -1px;
+    }
+    QTabBar::tab {
+        background-color: #3a3a3a;
+        color: white;
+        padding: 4px 12px;
+        margin-right: 2px;
+        border: 1px solid #5a9fd4;
+        border-bottom: none;
+        border-top-left-radius: 4px;
+        border-top-right-radius: 4px;
+        font-weight: bold;
+        font-size: 9pt;
+    }
+    QTabBar::tab:selected {
+        background-color: #5a9fd4;
+        color: white;
+    }
+    QTabBar::tab:hover {
+        background-color: #4a8fc4;
+    }
+"""
+
+_PM_FILE_COMBO_STYLE = (
+    "QComboBox { background-color:#3a3a3a; color:white; font-weight:bold; font-size:9pt; "
+    "padding:3px 24px 3px 8px; border:1px solid #5a9fd4; border-radius:4px; }"
+    "QComboBox QAbstractItemView { background-color:#2d2d2d; color:white; "
+    "selection-background-color:#5a9fd4; }"
+)
 
 
 
@@ -7432,9 +7527,10 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 continue
             changed_dialogs.append(dialog)
             try:
-                gp_dialog = getattr(dialog, '_glossary_progress_dialog', None)
+                # The Glossary page lives on the window's Glossary tab.
+                current_tab = getattr(dialog, '_pm_current_tab_name', None)
                 reopen_glossary = reopen_glossary or bool(
-                    gp_dialog is not None and gp_dialog.isVisible()
+                    callable(current_tab) and current_tab() == 'glossary'
                 )
             except RuntimeError:
                 pass
@@ -7483,13 +7579,6 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         self._progress_input_rebuild_running = True
         for dialog in changed_dialogs:
             dialog._progress_input_retired = True
-            try:
-                gp_dialog = getattr(dialog, '_glossary_progress_dialog', None)
-                if gp_dialog is not None:
-                    gp_dialog.hide()
-                    gp_dialog.deleteLater()
-            except RuntimeError:
-                pass
             try:
                 dialog.hide()
                 dialog.deleteLater()
@@ -7936,7 +8025,10 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                     ))
                     icon.update()
                 except RuntimeError:
-                    spin_timer.stop()
+                    try:
+                        spin_timer.stop()
+                    except RuntimeError:  # the window itself is gone
+                        pass
                 except Exception:
                     pass
 
@@ -7956,6 +8048,439 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         dialog_layout.addWidget(loading_widget)
         return dialog, dialog_layout, loading_widget, loading_label
 
+    # The Progress Manager window: a compact header with one file dropdown shared by
+    # every tab, then the Translation / Glossary / Interactive Images tabs.
+    _PM_TAB_TITLES = (
+        ('translation', "📖 Translation"),
+        ('glossary', "📚 Glossary"),
+        ('images', "🖼 Interactive Images"),
+    )
+
+    def _build_progress_manager_window(
+        self,
+        title="Progress Manager",
+        *,
+        tab_names=('translation', 'glossary', 'images'),
+        summary_text=None,
+        width_ratio=0.44,
+        height_ratio=0.4,
+    ):
+        """Create the (hidden) Progress Manager window.
+
+        The window shell comes from ``_create_retranslation_shell_dialog``; its spinner is
+        taken out of the layout and kept as ``window._pm_loading_widget`` for the first page.
+        Pages are added with ``window._pm_add_file(key, label, widget)`` (or through
+        ``window._pm_notebook.addTab``); tabs other than Translation build on first open
+        from ``window._pm_tab_factories[name](window, host)``. Fonts are stylesheet sizes, so
+        the GUI Font Scale applies to them."""
+        dialog, dialog_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog(
+            title,
+            width_ratio=width_ratio,
+            height_ratio=height_ratio,
+        )
+        dialog_layout.removeWidget(loading_widget)
+        loading_widget.hide()
+        spin_timer = getattr(dialog, '_loading_icon_timer', None)
+        if spin_timer is not None:
+            spin_timer.stop()  # restarted by the page that shows the spinner
+        dialog._pm_loading_widget = loading_widget
+        dialog._pm_loading_label = loading_label
+        dialog_layout.setContentsMargins(8, 6, 8, 8)
+        dialog_layout.setSpacing(4)
+
+        from qt_widget_helpers import NavComboRow, style_combo
+
+        header = QWidget(dialog)
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(2)
+        if summary_text:
+            summary_label = QLabel(summary_text)
+            summary_label.setStyleSheet("color: #cbd5e1; font-size: 9pt; font-weight: bold;")
+            header_layout.addWidget(summary_label)
+            dialog._pm_summary_label = summary_label
+        nav = NavComboRow("File:", "Previous file", "Next file", parent=header)
+        nav.layout().setSpacing(4)
+        nav.label.setStyleSheet("color: #94a3b8; font-size: 9pt; font-weight: bold;")
+        combo = nav.combo
+        style_combo(combo, _PM_FILE_COMBO_STYLE)
+        counter = QLabel("1 / 1")
+        counter.setStyleSheet("color: #94a3b8; font-size: 9pt; font-weight: bold;")
+        counter.setAlignment(Qt.AlignCenter)
+        counter.hide()
+        nav.layout().addWidget(counter)
+        header_layout.addWidget(nav)
+        dialog_layout.addWidget(header)
+
+        tabs = QTabWidget(dialog)
+        tabs.setStyleSheet(_PM_TABS_STYLE)
+        tabs.setTabBarAutoHide(True)  # a one-tab window shows no tab bar
+        pages = {}
+        titles = {}
+        for name, label in self._PM_TAB_TITLES:
+            if name not in tab_names:
+                continue
+            page = QWidget()
+            page._pm_tab_name = name
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(4, 6, 4, 4)
+            page_layout.setSpacing(4)
+            tabs.addTab(page, label)
+            pages[name] = page
+            titles[name] = label
+        dialog_layout.addWidget(tabs, 1)
+
+        translation_stack = None
+        if 'translation' in pages:
+            translation_stack = QStackedWidget(pages['translation'])
+            pages['translation'].layout().addWidget(translation_stack)
+        for name in ('glossary',):
+            if name in pages:
+                placeholder = QLabel("Loading glossary progress...")
+                placeholder.setAlignment(Qt.AlignCenter)
+                placeholder.setStyleSheet("color: #94a3b8; font-size: 10pt; font-weight: bold; padding: 18px;")
+                pages[name].layout().addWidget(placeholder)
+                pages[name]._pm_placeholder = placeholder
+
+        built = {name: name == 'translation' for name in pages}
+        state = {'tab': None}
+
+        dialog._pm_tabs = tabs
+        dialog._pm_tab_pages = pages
+        dialog._pm_file_combo = combo
+        dialog._pm_nav = nav
+        dialog._pm_files = []
+        dialog._pm_translation_stack = translation_stack
+        dialog._pm_page_data = {}
+        dialog._gp_panel_builders = {}
+        dialog._pm_file_changed_callbacks = []
+        dialog._pm_tab_callbacks = {}
+        dialog._pm_tab_factories = {}
+        dialog._pm_notebook = _DropdownNotebook(dialog)
+        dialog._pm_glossary_counts = {}
+        dialog._pm_glossary_count_providers = {}
+
+        def _update_nav():
+            idx = combo.currentIndex()
+            count = combo.count()
+            nav.update_arrows()
+            nav.setVisible(count > 1)  # one input file: no file row at all
+            counter.setVisible(count > 1)
+            counter.setText(f"{idx + 1} / {count}")
+
+        def _current_file():
+            try:
+                idx = combo.currentIndex()
+            except RuntimeError:  # window already deleted (a queued refresh)
+                return None
+            if 0 <= idx < len(dialog._pm_files):
+                return dialog._pm_files[idx]
+            return None
+
+        def _current_tab_name():
+            try:
+                return getattr(tabs.currentWidget(), '_pm_tab_name', None)
+            except RuntimeError:
+                return None
+
+        def _set_tab_count(name, text=None):
+            page = pages.get(name)
+            if page is None:
+                return
+            label = titles[name] + (f" ({text})" if text else "")
+            idx = tabs.indexOf(page)
+            if idx >= 0 and tabs.tabText(idx) != label:
+                tabs.setTabText(idx, label)
+
+        def _update_translation_count():
+            if 'translation' not in pages:
+                return
+            data = dialog._pm_page_data.get(_current_file())
+            if not isinstance(data, dict) or not data.get('chapter_display_info'):
+                _set_tab_count('translation')
+                return
+            try:
+                # The page's own legend numbers ("Total" / "Completed")
+                stats = self._progress_statistics(data)
+                total, done = stats[0], stats[2]
+            except Exception:
+                _set_tab_count('translation')
+                return
+            _set_tab_count('translation', f"{done}/{total}" if total else None)
+
+        def _update_glossary_count():
+            """Glossary tab label: completed/total of the CURRENT file, the numbers its
+            panel's legend shows ("Completed" / "Total"). Once the panel is built it
+            reports them itself; before that the file's count provider computes them
+            from the progress file with the panel's own model."""
+            if 'glossary' not in pages:
+                return
+            key = _current_file()
+            if key is None or not (len(dialog._pm_files) == 1 or str(key).lower().endswith('.epub')):
+                _set_tab_count('glossary')
+                return
+            stats = dialog._pm_glossary_counts.get(_pm_file_key(key))  # the built panel's live legend
+            provider = dialog._pm_glossary_count_providers.get(_pm_file_key(key))
+            if not isinstance(stats, dict) and callable(provider):
+                try:
+                    stats = provider()  # None: no glossary progress (or its count is still being built)
+                except Exception as exc:
+                    print(f"\u26a0\ufe0f Glossary tab count failed: {exc}")
+                    stats = None
+            total = stats.get('total', 0) if isinstance(stats, dict) else 0
+            done = stats.get('completed', 0) if isinstance(stats, dict) else 0
+            _set_tab_count('glossary', f"{done}/{total}" if total else None)
+
+        def _update_images_count():
+            """Interactive Images tab label before the tab is built (the built tab reports its
+            own numbers): built/total over the listed chapters, the shared tab_count_text."""
+            if 'images' not in pages or built.get('images'):
+                return
+            key = _current_file()
+            folder = dialog._pm_images_output_dirs.get(_pm_file_key(key)) if key is not None else None
+            if not folder or not os.path.isdir(folder):
+                _set_tab_count('images')
+                return
+            try:
+                import interactive_images_progress_core as ipc
+                signature = ipc.book_signature(folder)
+                cached = dialog._pm_images_counts.get(folder)
+                if cached is None or cached[0] != signature:
+                    model = ipc.open_progress(folder, ipc.glossary_skip_rules(getattr(self, 'config', None), self))
+                    cached = (signature, ipc.tab_count_text(ipc.image_stats(model)))
+                    dialog._pm_images_counts[folder] = cached
+                _set_tab_count('images', cached[1])
+            except Exception as exc:
+                print(f"\u26a0\ufe0f Interactive Images tab count failed: {exc}")
+                _set_tab_count('images')
+
+        def _set_glossary_count(key, stats):
+            """A file's built glossary panel reports its legend numbers (on every change)."""
+            dialog._pm_glossary_counts[_pm_file_key(key)] = dict(stats) if isinstance(stats, dict) else None
+            current = _current_file()
+            if current is not None and _pm_file_key(current) == _pm_file_key(key):
+                _update_glossary_count()
+
+        def _update_tab_counts():
+            _update_translation_count()
+            _update_glossary_count()
+            _update_images_count()
+        def _notify_tab(name, shown):
+            callbacks = dialog._pm_tab_callbacks.get(name)
+            if not callbacks:
+                return
+            callback = callbacks[0 if shown else 1]
+            if callable(callback):
+                try:
+                    callback()
+                except Exception as exc:
+                    print(f"⚠️ Progress Manager tab '{name}' update failed: {exc}")
+
+        def _ensure_tab_built(name):
+            if built.get(name):
+                return True
+            factory = dialog._pm_tab_factories.get(name)
+            page = pages.get(name)
+            if page is None or not callable(factory):
+                return False
+            built[name] = True
+            placeholder = getattr(page, '_pm_placeholder', None)
+            if placeholder is not None:
+                try:
+                    page.layout().removeWidget(placeholder)
+                    placeholder.setParent(None)
+                    placeholder.deleteLater()
+                except RuntimeError:
+                    pass
+                page._pm_placeholder = None
+            try:
+                factory(dialog, page)
+            except Exception as exc:
+                print(f"⚠️ Could not build the Progress Manager '{name}' tab: {exc}")
+                traceback.print_exc()
+            return True
+
+        def _add_file(key, label, widget=None):
+            if any(_pm_file_key(existing) == _pm_file_key(key) for existing in dialog._pm_files):
+                return
+            dialog._pm_files.append(key)
+            if translation_stack is not None:
+                translation_stack.addWidget(widget if widget is not None else QWidget())
+            combo.addItem(str(label))
+            combo.setItemData(combo.count() - 1, str(key), Qt.ToolTipRole)
+            _update_nav()
+
+        def _select_file(key):
+            if key is None:
+                return False
+            wanted = _pm_file_key(key)
+            for idx, existing in enumerate(dialog._pm_files):
+                if _pm_file_key(existing) == wanted:
+                    if combo.currentIndex() != idx:
+                        combo.setCurrentIndex(idx)
+                    return True
+            return False
+
+        def _on_file_changed(idx):
+            if translation_stack is not None and 0 <= idx < translation_stack.count():
+                translation_stack.setCurrentIndex(idx)
+            _update_nav()
+            key = _current_file()
+            for callback in list(dialog._pm_file_changed_callbacks):
+                try:
+                    callback(key)
+                except Exception as exc:
+                    print(f"⚠️ Progress Manager file switch failed: {exc}")
+            populate_current = getattr(dialog, '_populate_current_progress_tab', None)
+            if callable(populate_current) and _current_tab_name() == 'translation':
+                QTimer.singleShot(0, populate_current)
+            _update_tab_counts()
+
+        combo.currentIndexChanged.connect(_on_file_changed)
+
+        def _on_tab_changed(_idx):
+            previous = state['tab']
+            current = _current_tab_name()
+            state['tab'] = current
+            if previous and previous != current:
+                _notify_tab(previous, False)
+            if current:
+                _ensure_tab_built(current)
+            if current == 'translation' and previous and previous != current:
+                # The pages ignore refreshes while hidden: catch up now.
+                populate_current = getattr(dialog, '_populate_current_progress_tab', None)
+                if callable(populate_current):
+                    QTimer.singleShot(0, populate_current)
+                for refresher in list(getattr(dialog, '_progress_show_refreshers', ())):
+                    QTimer.singleShot(0, refresher)
+            if current and dialog.isVisible():
+                _notify_tab(current, True)
+            _update_tab_counts()
+
+        state['tab'] = _current_tab_name()
+        tabs.currentChanged.connect(_on_tab_changed)
+
+        def _on_visibility(visible):
+            current = _current_tab_name()
+            if current:
+                _notify_tab(current, visible)
+            if visible:
+                _update_tab_counts()
+
+        visibility_filter = _ProgressWindowEventFilter(_on_visibility, dialog)
+        dialog.installEventFilter(visibility_filter)
+        dialog._pm_event_filter = visibility_filter
+
+        def _show_tab(name, fp=None):
+            page = pages.get(name)
+            if page is None:
+                return False
+            if fp is not None:
+                _select_file(fp)
+            was_visible = dialog.isVisible()
+            was_current = tabs.currentWidget() is page
+            _ensure_tab_built(name)
+            tabs.setCurrentWidget(page)
+            dialog.setWindowState((dialog.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            if was_visible and was_current:
+                _notify_tab(name, True)
+            return True
+
+        def _register_tab_factory(name, factory):
+            if name not in pages or callable(dialog._pm_tab_factories.get(name)):
+                return
+            dialog._pm_tab_factories[name] = factory
+            if _current_tab_name() == name and not built.get(name):
+                _ensure_tab_built(name)
+                if dialog.isVisible():
+                    _notify_tab(name, True)
+
+        def _register_glossary(key, builder, page_factory, count_provider=None):
+            """A file's page registers its own glossary panel builder (its own output
+            folder, progress data and locator), the shared Glossary page factory and the
+            provider of the file's legend numbers for the tab label (before its panel
+            is built)."""
+            dialog._gp_panel_builders[_pm_file_key(key)] = builder
+            if callable(count_provider):
+                dialog._pm_glossary_count_providers[_pm_file_key(key)] = count_provider
+            _register_tab_factory('glossary', page_factory)
+            added = getattr(dialog, '_pm_glossary_builder_added', None)
+            if callable(added):
+                added(key)
+
+        def _window_gp_refresh_visible(*args, **kwargs):
+            # Glossary Manager toggles refresh every visible window that has this.
+            if _current_tab_name() != 'glossary':
+                return
+            refresh_visible = getattr(getattr(dialog, '_pm_glossary_page', None), '_gp_refresh_visible', None)
+            if callable(refresh_visible):
+                refresh_visible(*args, **kwargs)
+
+        def _build_images_placeholder(window, host):
+            icon = QLabel("🖼")
+            icon.setAlignment(Qt.AlignCenter)
+            icon.setStyleSheet("font-size: 28pt; padding-top: 24px;")
+            message = QLabel("No interactive images yet")
+            message.setAlignment(Qt.AlignCenter)
+            message.setStyleSheet("color: #7a8a9e; font-size: 10pt; font-weight: bold;")
+            host.layout().addWidget(icon)
+            host.layout().addWidget(message)
+            host.layout().addStretch(1)
+
+        dialog._pm_current_file = _current_file
+        dialog._pm_current_tab_name = _current_tab_name
+        dialog._pm_add_file = _add_file
+        dialog._pm_select_file = _select_file
+        dialog._pm_show_tab = _show_tab
+        dialog._pm_set_tab_count = _set_tab_count
+        dialog._pm_update_nav = _update_nav
+        dialog._pm_update_translation_count = _update_translation_count
+        dialog._pm_update_glossary_count = _update_glossary_count
+        dialog._pm_set_glossary_count = _set_glossary_count
+        dialog._pm_update_tab_counts = _update_tab_counts
+        dialog._pm_update_images_count = _update_images_count
+        dialog._pm_register_tab_factory = _register_tab_factory
+        dialog._pm_register_glossary = _register_glossary
+        if 'glossary' in pages:
+            dialog._gp_refresh_visible = _window_gp_refresh_visible
+        dialog._pm_images_output_dirs = {}
+        dialog._pm_images_counts = {}
+
+        def _register_images(key, output_dir):
+            # A file's page registers its output folder for the Interactive Images tab.
+            if output_dir:
+                dialog._pm_images_output_dirs[_pm_file_key(key)] = output_dir
+                QTimer.singleShot(0, _update_images_count)
+
+        def _build_images_page(window, host):
+            try:
+                from interactive_images_gui import build_images_page
+            except Exception as exc:
+                print(f"⚠️ Interactive Images tab unavailable: {exc}")
+                _build_images_placeholder(window, host)
+                return
+            build_images_page(self, window, host)
+
+        dialog._pm_register_images = _register_images
+        if 'images' in pages:
+            dialog._pm_tab_factories['images'] = _build_images_page
+
+        count_timer = QTimer(dialog)
+        count_timer.setInterval(3000)
+        count_timer.timeout.connect(lambda: dialog.isVisible() and _update_tab_counts())
+        count_timer.start()
+        dialog._pm_count_timer = count_timer
+
+        def closeEvent(event):
+            event.ignore()
+            dialog.hide()
+
+        dialog.closeEvent = closeEvent
+        return dialog
+
     def _show_retranslation_shell_then_build(
         self,
         file_path,
@@ -7965,15 +8490,25 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         glossary_progress_source_path=None,
         glossary_progress_source_filenames=None,
     ):
-        dialog, dialog_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog("Progress Manager")
+        dialog = self._build_progress_manager_window("Progress Manager")
         self._stamp_progress_manager_input_signature(dialog)
         file_key = cache_key or os.path.abspath(file_path)
-
-        def closeEvent(event):
-            event.ignore()
-            dialog.hide()
-
-        dialog.closeEvent = closeEvent
+        page_key = os.path.abspath(file_path)
+        loading_widget = dialog._pm_loading_widget
+        loading_label = dialog._pm_loading_label
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(loading_widget)
+        loading_widget.show()
+        spin_timer = getattr(dialog, '_loading_icon_timer', None)
+        if spin_timer is not None:
+            spin_timer.start(45)
+        dialog._pm_add_file(
+            page_key,
+            os.path.splitext(os.path.basename(file_path))[0] or file_path,
+            page,
+        )
         dialog.show()
         try:
             from PySide6.QtWidgets import QApplication
@@ -7985,7 +8520,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             try:
                 if getattr(dialog, '_progress_input_retired', False):
                     return
-                content = QWidget(dialog)
+                content = QWidget(page)
                 content_layout = QVBoxLayout(content)
                 content_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -8013,7 +8548,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                     timer.stop()
                 loading_widget.hide()
                 loading_widget.deleteLater()
-                dialog_layout.addWidget(content)
+                page_layout.addWidget(content)
+                dialog._pm_page_data[page_key] = result
+                dialog._pm_update_translation_count()
 
                 dialog.setWindowTitle("Progress Manager - OPF Based" if result.get('spine_chapters') else "Progress Manager")
                 if not hasattr(self, '_retranslation_dialog_cache'):
@@ -8495,10 +9032,11 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             title_text = "PDF bookmark sections:"
         else:
             title_text = "Select chapters to retranslate:"
-        title_label = QLabel(title_text)
-        title_font = QFont('Arial', 12 if not tab_frame else 11)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
+        title_label = _OneLineTitleLabel(title_text)
+        # A stylesheet size (not QFont) so the GUI Font Scale applies.
+        title_label.setStyleSheet(
+            f"font-family: Arial; font-size: {12 if not tab_frame else 10}pt; font-weight: bold;"
+        )
         title_layout.addWidget(title_label)
         
         title_layout.addStretch()
@@ -8678,30 +9216,35 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         _glossary_refinement_expected_entries = _gp_locator._glossary_refinement_expected_entries
         _find_glossary_for_refinement = _gp_locator._find_glossary_for_refinement
         
-        glossary_progress_btn = QPushButton("📊 Glossary Progress")
-        glossary_progress_btn.setCursor(Qt.PointingHandCursor)
-        glossary_progress_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2d6a4f;
-                color: #d8f3dc;
-                border: 1px solid #40916c;
-                border-radius: 4px;
-                padding: 3px 10px;
-                font-size: 9pt;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #40916c;
-                border-color: #52b788;
-            }
-        """)
-        # Always show; the dialog has an empty-state panel until progress exists.
-        _initial_glossary_progress_file = _find_glossary_progress_file()
-        glossary_progress_btn.setVisible(True)
-        if _initial_glossary_progress_file:
-            glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{_initial_glossary_progress_file}")
-        else:
-            glossary_progress_btn.setToolTip("View glossary extraction progress")
+        # The Progress Manager window's Glossary tab shows this page: the title-row button is only for a page
+        # shown outside a window that has one (its _show_glossary_progress opens a one-tab window).
+        _has_glossary_tab = 'glossary' in (getattr(parent_dialog, '_pm_tab_pages', None) or {})
+        glossary_progress_btn = None
+        if not _has_glossary_tab:
+            glossary_progress_btn = QPushButton("📊 Glossary Progress")
+            glossary_progress_btn.setCursor(Qt.PointingHandCursor)
+            glossary_progress_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2d6a4f;
+                    color: #d8f3dc;
+                    border: 1px solid #40916c;
+                    border-radius: 4px;
+                    padding: 3px 10px;
+                    font-size: 9pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #40916c;
+                    border-color: #52b788;
+                }
+            """)
+            # Always show; the dialog has an empty-state panel until progress exists.
+            _initial_glossary_progress_file = _find_glossary_progress_file()
+            glossary_progress_btn.setVisible(True)
+            if _initial_glossary_progress_file:
+                glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{_initial_glossary_progress_file}")
+            else:
+                glossary_progress_btn.setToolTip("View glossary extraction progress")
 
         def _sdlxliff_sidecar_paths_for_output_dir(_output_dir):
             sidecar_dir = os.path.join(_output_dir or "", "SDLXLIFF")
@@ -9876,6 +10419,19 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 execution_plan,
             )
         
+        def _gp_model_kwargs():
+            """The make_glossary_progress_model arguments of this file's glossary panel
+            (also used for the Glossary tab's pre-build count)."""
+            return dict(
+                glossary_progress_source_path=glossary_progress_source_path,
+                glossary_progress_source_filenames=glossary_progress_source_filenames,
+                output_dir=output_dir,
+                prog=prog,
+                find_gp_for_file=_find_gp_for_file,
+                glossary_refinement_expected_entries=_glossary_refinement_expected_entries,
+                refinement_type_key=_refinement_type_key,
+            )
+
         def _build_gp_panel(fp, gp_path, parent_widget, pump_loading=None):
             """Build a glossary progress panel for a single EPUB. Returns (panel_widget, refresh_func)."""
             from PySide6.QtWidgets import QStackedWidget, QComboBox
@@ -9885,14 +10441,8 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 fp,
                 gp_path,
                 pump_loading=pump_loading,
-                glossary_progress_source_path=glossary_progress_source_path,
-                glossary_progress_source_filenames=glossary_progress_source_filenames,
-                output_dir=output_dir,
-                prog=prog,
-                find_gp_for_file=_find_gp_for_file,
-                glossary_refinement_expected_entries=_glossary_refinement_expected_entries,
-                refinement_type_key=_refinement_type_key,
                 current_gp_data=lambda: gp_data,
+                **_gp_model_kwargs(),
             )
             _pump_loading_frame = _gp_model._pump_loading_frame
             _gp_load_progress_dict = _gp_model._gp_load_progress_dict
@@ -9961,6 +10511,19 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             _gp_collect_footnotes = _gp_model._gp_collect_footnotes
             _find_glossary_file = _gp_model._find_glossary_file
             _gp_apply_remove_from_progress = _gp_model._gp_apply_remove_from_progress
+
+            def _report_gp_count(stats):
+                # The Progress Manager window's Glossary tab label shows these legend numbers
+                owner_window = (
+                    parent_dialog
+                    if callable(getattr(parent_dialog, '_pm_set_glossary_count', None))
+                    else getattr(dialog, '_pm_glossary_window', None)
+                )
+                if callable(getattr(owner_window, '_pm_set_glossary_count', None)):
+                    try:
+                        owner_window._pm_set_glossary_count(fp, stats)
+                    except RuntimeError:
+                        pass
             
             panel = QWidget(parent_widget)
             p_layout = QVBoxLayout(panel)
@@ -10017,6 +10580,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             n_in_progress = _legend_stats_init['in_progress']
             n_not_refined = _legend_stats_init['not_refined']
             n_refine_failed = _legend_stats_init['refine_failed']
+            _report_gp_count(_legend_stats_init)
             
             gp_stats_frame = QWidget()
             gp_stats_layout = QHBoxLayout(gp_stats_frame)
@@ -10310,6 +10874,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 lbl_gp_not_refined.setVisible(not_refined > 0)
                 lbl_gp_refine_failed.setText(f"💀 Refine Failed: {refine_failed}")
                 lbl_gp_refine_failed.setVisible(refine_failed > 0)
+                _report_gp_count(stats)
 
             # Helper to refresh stats labels from a loaded progress dict
             def _refresh_stats_from_dict(_d):
@@ -11532,86 +12097,327 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
 
             return panel, _refresh
         
-        def _show_glossary_progress():
-            """Show glossary extraction progress for all EPUBs (with or without progress files)."""
+        def _build_gp_empty_panel(fp, parent_widget):
+            """Build a placeholder panel for an EPUB without glossary progress yet.
+            Returns (panel_widget, refresh_func) — refresh auto-upgrades to full panel."""
+            epub_base = os.path.splitext(os.path.basename(fp))[0]
+            
+            panel = QWidget(parent_widget)
+            p_layout = QVBoxLayout(panel)
+            p_layout.setContentsMargins(12, 20, 12, 20)
+            
+            empty_icon = QLabel("📊")
+            empty_icon.setAlignment(Qt.AlignCenter)
+            empty_icon.setStyleSheet("font-size: 36pt;")
+            p_layout.addWidget(empty_icon)
+
+            glossary_path = _find_glossary_for_refinement(fp)
             try:
-                # Reuse cached dialog if it still exists
-                _cached = getattr(dialog, '_glossary_progress_dialog', None)
-                if _cached is not None:
-                    try:
-                        _cached.show()
-                        _cached.raise_()
-                        _cached.activateWindow()
-                        # Restart auto-refresh timer if it was stopped on hide
-                        _gpt = getattr(_cached, '_gp_auto_refresh_timer', None)
-                        if _gpt is not None and not _gpt.isActive():
-                            _gpt.start()
+                empty_glossary_entries = parse_glossary_file(glossary_path) if glossary_path else []
+            except Exception:
+                empty_glossary_entries = []
+            expected_refinement = _glossary_refinement_expected_entries(empty_glossary_entries)
+            empty_label = QLabel(f"No glossary extraction progress found for:\n{epub_base}")
+            empty_label.setAlignment(Qt.AlignCenter)
+            empty_label.setStyleSheet("color: #7a8a9e; font-size: 11pt;")
+            empty_label.setWordWrap(True)
+            p_layout.addWidget(empty_label)
+            
+            hint_text = "Run glossary extraction to see chapter progress. Refinement entry types are listed below."
+            hint_label = QLabel(hint_text)
+            hint_label.setAlignment(Qt.AlignCenter)
+            hint_label.setStyleSheet("color: #555; font-size: 9pt; font-style: italic;")
+            p_layout.addWidget(hint_label)
 
-                        def _refresh_cached_gp_panels():
-                            refresh_visible = getattr(_cached, '_gp_refresh_visible', None)
-                            if callable(refresh_visible):
-                                refresh_visible()
-
-                        QTimer.singleShot(0, _refresh_cached_gp_panels)
-                        return
-                    except RuntimeError:
-                        # Widget was deleted
-                        dialog._glossary_progress_dialog = None
-                        dialog._gp_refresh_funcs = []
-                
-                # Gather all EPUB paths from multi-file dialog or just this file
-                all_files = [file_path]
-                if parent_dialog and hasattr(parent_dialog, '_epub_files_in_dialog'):
-                    all_files = [f for f in parent_dialog._epub_files_in_dialog if str(f).lower().endswith('.epub')]
-                if not all_files:
-                    all_files = [file_path]
-                
-                # Build entries for ALL EPUBs — gp_path is None when no progress file exists
-                all_file_entries = []
-                for fp in all_files:
-                    gp = _find_gp_for_file(fp)
-                    if gp and os.path.isfile(gp):
-                        all_file_entries.append((fp, gp))
+            if expected_refinement:
+                ref_list = QListWidget(panel)
+                ref_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+                ref_list.setContextMenuPolicy(Qt.CustomContextMenu)
+                ref_list.setSpacing(0)
+                ref_list.setUniformItemSizes(True)
+                ref_list.setStyleSheet("""
+                    QListWidget {
+                        background-color: #1f1f1f;
+                        color: white;
+                        border: 1px solid #4a5568;
+                        border-radius: 4px;
+                        padding: 4px;
+                    }
+                    QListWidget::item {
+                        margin: 0px;
+                        padding: 0px 4px;
+                    }
+                """)
+                ref_list.setMaximumHeight(160)
+                for _ref_key, ref_info in expected_refinement.items():
+                    entry_type = str(ref_info.get('entry_type') or _ref_key.replace('type::', '')).strip() or 'entry type'
+                    ref_status = str(ref_info.get('status') or 'not_refined')
+                    if ref_status == 'skipped':
+                        display = f"Refinement | ⏭️ Skipped - No Entries | {entry_type}"
+                        color = '#94a3b8'
                     else:
-                        all_file_entries.append((fp, None))
-                
-                # Create dialog
-                gp_dialog = QDialog(dialog)
-                gp_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
-                n_files = len(all_file_entries)
-                if n_files == 1:
-                    gp_dialog.setWindowTitle(f"Glossary Extraction Progress — {os.path.basename(all_file_entries[0][0])}")
-                else:
-                    gp_dialog.setWindowTitle(f"Glossary Extraction Progress — {n_files} files")
-                gp_dialog.setWindowModality(Qt.NonModal)
-                gp_title_text = gp_dialog.windowTitle()
+                        display = f"Refinement | \u2728 Not Refined          | {entry_type}"
+                        color = '#5a9fd4'
+                    item = QListWidgetItem(display)
+                    item.setForeground(QColor(color))
+                    item.setData(Qt.UserRole, ref_status)
+                    item.setData(Qt.UserRole + 3, _ref_key)
+                    self._add_compact_inline_list_item(ref_list, item)
+
+                def _empty_refinement_menu(pos):
+                    clicked = ref_list.itemAt(pos)
+                    if clicked is not None and not clicked.isSelected():
+                        ref_list.clearSelection()
+                        clicked.setSelected(True)
+                    selected_items = [
+                        item for item in ref_list.selectedItems()
+                        if item.data(Qt.UserRole + 3)
+                    ]
+                    if not selected_items:
+                        return
+                    selected_keys = [str(item.data(Qt.UserRole + 3)) for item in selected_items]
+                    aggregate_selected = any(key.startswith('all::') for key in selected_keys)
+                    active_types = _active_glossary_refinement_types()
+                    selected_types = _normalize_glossary_refinement_selection(
+                        selected_keys,
+                        active_types,
+                    )
+                    counts = Counter(
+                        _refinement_type_key(entry.get('type'))
+                        for entry in empty_glossary_entries
+                        if isinstance(entry, dict)
+                    )
+                    eligible = sum(counts.get(_refinement_type_key(name), 0) for name in selected_types)
+                    context_menu = QMenu(ref_list)
+                    context_menu.setStyleSheet(
+                        "QMenu { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 4px 8px 4px 4px; }"
+                        "QMenu::item { padding: 6px 24px 6px 6px; }"
+                        "QMenu::item:selected { background-color: #c0392b; }"
+                        "QMenu::item:disabled { color: #6b7280; background-color: transparent; }"
+                    )
+                    if aggregate_selected or len(selected_items) == 1:
+                        refine_action = context_menu.addAction('✨ Refine this')
+                    else:
+                        refine_action = context_menu.addAction(
+                            f'✨ Refine selected entry types ({len(selected_types)})'
+                        )
+                    refine_action.setEnabled(eligible > 0)
+                    if context_menu.exec(ref_list.viewport().mapToGlobal(pos)) != refine_action:
+                        return
+                    target_progress = os.path.join(
+                        os.path.dirname(glossary_path),
+                        f'{epub_base}_glossary_progress.json',
+                    ) if glossary_path else None
+                    _confirm_manual_glossary_refinement(
+                        panel,
+                        fp,
+                        target_progress,
+                        selected_types,
+                    )
+
+                ref_list.customContextMenuRequested.connect(_empty_refinement_menu)
+                p_layout.addWidget(ref_list)
+            
+            p_layout.addStretch()
+            
+            # State container for upgrade tracking
+            _state = {'upgraded': False}
+            
+            def _empty_refresh(force=False, on_complete=None):
+                """Check if a progress file appeared and upgrade the panel in-place."""
+                if _state['upgraded']:
+                    # After the upgrade this panel refreshes like the real one.
+                    real_refresh = _state.get('refresh')
+                    if callable(real_refresh):
+                        real_refresh(force=force, on_complete=on_complete)
+                    elif callable(on_complete):
+                        on_complete()
+                    return
+                gp = _find_gp_for_file(fp)
+                if gp and os.path.isfile(gp):
+                    _state['upgraded'] = True
+                    # Clear placeholder content
+                    while p_layout.count():
+                        item = p_layout.takeAt(0)
+                        if item and item.widget():
+                            item.widget().deleteLater()
+                    # Build the real panel content inside this existing panel
+                    real_panel, real_refresh = _build_gp_panel(fp, gp, panel)
+                    p_layout.addWidget(real_panel)
+                    # Later refreshes go to the real panel
+                    _state['refresh'] = real_refresh
+                    if force:
+                        real_refresh(force=True, on_complete=on_complete)
+                        return
+                if callable(on_complete):
+                    on_complete()
+            
+            return panel, _empty_refresh
+
+        def _build_gp_file_panel(parent_widget, pump_loading=None):
+            """This file's Glossary tab panel: the progress panel, or the placeholder that
+            upgrades itself once a progress file appears. Bound to this file's own output
+            folder, progress data and locator (each file of the window registers its own)."""
+            gp = _find_gp_for_file(file_path)
+            if gp and os.path.isfile(gp):
+                return _build_gp_panel(file_path, gp, parent_widget, pump_loading=pump_loading)
+            return _build_gp_empty_panel(file_path, parent_widget)
+
+        _gp_count_cache = {}
+        _gp_count_jobs = set()
+
+        def _gp_count_stats():
+            """This file's legend numbers from its progress file, without building the
+            panel (the panel's own model). Never blocks the UI: the model is rebuilt on a
+            worker thread when the progress file changes (or after 30 s), and the Progress
+            Manager's count timer shows the new numbers on its next tick. None until the
+            first build finishes, and when the file has no glossary progress."""
+            gp = _find_gp_for_file(file_path)
+            if not gp or not os.path.isfile(gp):
+                return None
+            signature = glossary_progress_signature(gp)
+            cached = _gp_count_cache.get(gp)
+            fresh = bool(cached) and cached[0] == signature and time.time() - cached[1] < 30
+            if not fresh and gp not in _gp_count_jobs:
+                _gp_count_jobs.add(gp)
+                kwargs = _gp_model_kwargs()
+
+                def _build_count():
+                    try:
+                        stats = glossary_progress_legend_stats(self, file_path, gp, **kwargs)
+                    except Exception as exc:
+                        print(f"⚠️ Glossary tab count failed: {exc}")
+                        stats = cached[2] if cached else None
+                    _gp_count_cache[gp] = (signature, time.time(), stats)
+                    _gp_count_jobs.discard(gp)
+
+                threading.Thread(target=_build_count, name="glossary-tab-count", daemon=True).start()
+            return cached[2] if cached else None
+
+        def _show_glossary_progress():
+            """Show glossary extraction progress on the Progress Manager's Glossary tab."""
+            try:
+                window = parent_dialog if callable(getattr(parent_dialog, '_pm_show_tab', None)) else None
+                if window is None:
+                    # Standalone Progress Manager: the same Glossary page in a one-tab window.
+                    window = getattr(dialog, '_pm_glossary_window', None)
+                    try:
+                        if window is not None:
+                            window.isVisible()
+                    except RuntimeError:
+                        window = None
+                    if window is None:
+                        window = self._build_progress_manager_window(
+                            f"Glossary Extraction Progress — {os.path.basename(file_path)}",
+                            tab_names=('glossary',),
+                            width_ratio=0.39,
+                            height_ratio=0.45,
+                        )
+                        window._pm_add_file(
+                            os.path.abspath(file_path),
+                            os.path.splitext(os.path.basename(file_path))[0] or file_path,
+                        )
+                        window._pm_register_glossary(
+                            file_path, _build_gp_file_panel, _build_glossary_page, _gp_count_stats
+                        )
+                        dialog._pm_glossary_window = window
+                window._pm_show_tab('glossary')
+            except Exception as e:
+                print(f"⚠️ Error showing glossary progress: {e}")
+                import traceback
+                traceback.print_exc()
+
+        def _build_glossary_page(window, host):
+            """The Glossary tab, built on its first open. Each file of the window gets its
+            panel from its own registered builder the first time it is selected there."""
+            gp_content = QWidget(host)
+            gp_content_layout = QVBoxLayout(gp_content)
+            gp_content_layout.setContentsMargins(0, 0, 0, 0)
+            gp_content_layout.setSpacing(6)
+            host.layout().addWidget(gp_content)
+
+            # Title + note
+            gp_title = QLabel("Glossary Extraction Progress")
+            gp_title.setStyleSheet("color: #52b788; font-size: 11pt; font-weight: bold;")
+            gp_content_layout.addWidget(gp_title)
+
+            gp_note = QLabel("ℹ️ Tracks Balanced / Full auto glossary modes (Extract Glossary logic)")
+            gp_note.setStyleSheet("color: #7a8a9e; font-size: 8pt; font-style: italic;")
+            gp_note.setWordWrap(True)
+            gp_content_layout.addWidget(gp_note)
+
+            # One page per file of the window, built when the file is first selected.
+            gp_stack = QStackedWidget(gp_content)
+            gp_content_layout.addWidget(gp_stack, 1)
+            gp_slots = {}
+            all_refresh_funcs = {}
+            gp_waiting = set()
+
+            def _gp_slot_for(key):
+                slot = gp_slots.get(_pm_file_key(key))
+                if slot is None:
+                    slot = QWidget()
+                    slot_layout = QVBoxLayout(slot)
+                    slot_layout.setContentsMargins(0, 0, 0, 0)
+                    gp_stack.addWidget(slot)
+                    gp_slots[_pm_file_key(key)] = slot
+                return slot
+
+            def _gp_eligible(key):
+                # One file shows its panel whatever its type; with several files only
+                # the EPUBs have glossary progress (as in the old Glossary Progress window).
+                return len(window._pm_files) == 1 or str(key).lower().endswith('.epub')
+
+            def _gp_drop_widget(slot, widget):
+                if widget is None:
+                    return
                 try:
-                    gp_dialog.deleteLater()
-                except Exception:
+                    slot.layout().removeWidget(widget)
+                    widget.setParent(None)
+                    widget.deleteLater()
+                except RuntimeError:
                     pass
-                gp_dialog, gp_main_layout, loading_widget, loading_label = self._create_retranslation_shell_dialog(
-                    gp_title_text,
-                    width_ratio=0.39,
-                    height_ratio=0.45,
-                )
-                gp_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
-                gp_dialog.setWindowModality(Qt.NonModal)
-                loading_label.setText("Loading glossary progress...")
-                # Cache and show the shell before building the heavier panels.
-                dialog._glossary_progress_dialog = gp_dialog
-                dialog._gp_refresh_funcs = []
-                gp_dialog.show()
-                try:
-                    from PySide6.QtWidgets import QApplication
-                    QApplication.processEvents(QEventLoop.AllEvents, 50)
-                except Exception:
-                    pass
+
+            def _gp_slot_message(slot, text):
+                message = QLabel(text)
+                message.setAlignment(Qt.AlignCenter)
+                message.setWordWrap(True)
+                message.setStyleSheet("color: #94a3b8; font-size: 10pt; font-weight: bold; padding: 18px;")
+                slot.layout().addWidget(message)
+                return message
+
+            def _gp_build_slot(key):
+                slot = _gp_slot_for(key)
+                if getattr(slot, '_gp_built', False):
+                    return slot
+                name = os.path.splitext(os.path.basename(str(key)))[0] or str(key)
+                if not _gp_eligible(key):
+                    slot._gp_built = True
+                    _gp_slot_message(
+                        slot,
+                        "No glossary progress for text files"
+                        if os.path.isfile(str(key))
+                        else "No glossary progress for this item",
+                    )
+                    return slot
+                builder = window._gp_panel_builders.get(_pm_file_key(key))
+                if not callable(builder):
+                    # This file's page is still being built; its builder arrives with it.
+                    if getattr(slot, '_gp_waiting_label', None) is None:
+                        slot._gp_waiting_label = _gp_slot_message(slot, f"Loading {name}...")
+                    gp_waiting.add(_pm_file_key(key))
+                    return slot
+                _gp_drop_widget(slot, getattr(slot, '_gp_waiting_label', None))
+                slot._gp_waiting_label = None
+                gp_waiting.discard(_pm_file_key(key))
+                slot._gp_built = True
+                loading = _gp_slot_message(slot, f"Loading {name}...")
 
                 def _pump_gp_loading(msg=None):
                     try:
-                        if msg and loading_label is not None:
-                            loading_label.setText(msg)
-                        advance = getattr(gp_dialog, '_advance_loading_icon', None)
+                        if msg:
+                            loading.setText(msg)
+                        advance = getattr(window, '_advance_loading_icon', None)
                         if callable(advance):
                             advance()
                         from PySide6.QtWidgets import QApplication
@@ -11619,491 +12425,165 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                     except Exception:
                         pass
 
-                gp_content = QWidget(gp_dialog)
-                gp_content.hide()
-                gp_content_layout = QVBoxLayout(gp_content)
-                gp_content_layout.setContentsMargins(0, 0, 0, 0)
-                gp_content_layout.setSpacing(6)
-                gp_main_layout.addWidget(gp_content)
-                
-                # Title + note
-                gp_title = QLabel("Glossary Extraction Progress")
-                gp_title_font = QFont('Arial', 12)
-                gp_title_font.setBold(True)
-                gp_title.setFont(gp_title_font)
-                gp_title.setStyleSheet("color: #52b788;")
-                gp_content_layout.addWidget(gp_title)
-                
-                gp_note = QLabel("ℹ️ Tracks Balanced / Full auto glossary modes (Extract Glossary logic)")
-                gp_note.setStyleSheet("color: #7a8a9e; font-size: 8pt; font-style: italic;")
-                gp_note.setWordWrap(True)
-                gp_content_layout.addWidget(gp_note)
-                _pump_gp_loading()
-                
-                # Build panels and collect refresh functions
-                all_refresh_funcs = []
-                gp_navigation_widget = None
-                
-                def _build_gp_empty_panel(fp, parent_widget):
-                    """Build a placeholder panel for an EPUB without glossary progress yet.
-                    Returns (panel_widget, refresh_func) — refresh auto-upgrades to full panel."""
-                    epub_base = os.path.splitext(os.path.basename(fp))[0]
-                    
-                    panel = QWidget(parent_widget)
-                    p_layout = QVBoxLayout(panel)
-                    p_layout.setContentsMargins(12, 20, 12, 20)
-                    
-                    empty_icon = QLabel("📊")
-                    empty_icon.setAlignment(Qt.AlignCenter)
-                    empty_icon.setStyleSheet("font-size: 36pt;")
-                    p_layout.addWidget(empty_icon)
+                try:
+                    panel, refresh_fn = builder(slot, pump_loading=_pump_gp_loading)
+                finally:
+                    _gp_drop_widget(slot, loading)
+                slot.layout().addWidget(panel)
+                all_refresh_funcs[_pm_file_key(key)] = refresh_fn
+                dialog._gp_refresh_funcs = list(all_refresh_funcs.values())
+                return slot
 
-                    glossary_path = _find_glossary_for_refinement(fp)
-                    try:
-                        empty_glossary_entries = parse_glossary_file(glossary_path) if glossary_path else []
-                    except Exception:
-                        empty_glossary_entries = []
-                    expected_refinement = _glossary_refinement_expected_entries(empty_glossary_entries)
-                    empty_label = QLabel(f"No glossary extraction progress found for:\n{epub_base}")
-                    empty_label.setAlignment(Qt.AlignCenter)
-                    empty_label.setStyleSheet("color: #7a8a9e; font-size: 11pt;")
-                    empty_label.setWordWrap(True)
-                    p_layout.addWidget(empty_label)
-                    
-                    hint_text = "Run glossary extraction to see chapter progress. Refinement entry types are listed below."
-                    hint_label = QLabel(hint_text)
-                    hint_label.setAlignment(Qt.AlignCenter)
-                    hint_label.setStyleSheet("color: #555; font-size: 9pt; font-style: italic;")
-                    p_layout.addWidget(hint_label)
+            def _gp_select_current():
+                key = window._pm_current_file()
+                if key is None:
+                    return
+                try:
+                    slot = _gp_build_slot(key)
+                except Exception as exc:
+                    print(f"⚠️ Error showing glossary progress: {exc}")
+                    import traceback
+                    traceback.print_exc()
+                    return
+                gp_stack.setCurrentWidget(slot)
 
-                    if expected_refinement:
-                        ref_list = QListWidget(panel)
-                        ref_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-                        ref_list.setContextMenuPolicy(Qt.CustomContextMenu)
-                        ref_list.setSpacing(0)
-                        ref_list.setUniformItemSizes(True)
-                        ref_list.setStyleSheet("""
-                            QListWidget {
-                                background-color: #1f1f1f;
-                                color: white;
-                                border: 1px solid #4a5568;
-                                border-radius: 4px;
-                                padding: 4px;
-                            }
-                            QListWidget::item {
-                                margin: 0px;
-                                padding: 0px 4px;
-                            }
-                        """)
-                        ref_list.setMaximumHeight(160)
-                        for _ref_key, ref_info in expected_refinement.items():
-                            entry_type = str(ref_info.get('entry_type') or _ref_key.replace('type::', '')).strip() or 'entry type'
-                            ref_status = str(ref_info.get('status') or 'not_refined')
-                            if ref_status == 'skipped':
-                                display = f"Refinement | ⏭️ Skipped - No Entries | {entry_type}"
-                                color = '#94a3b8'
-                            else:
-                                display = f"Refinement | \u2728 Not Refined          | {entry_type}"
-                                color = '#5a9fd4'
-                            item = QListWidgetItem(display)
-                            item.setForeground(QColor(color))
-                            item.setData(Qt.UserRole, ref_status)
-                            item.setData(Qt.UserRole + 3, _ref_key)
-                            self._add_compact_inline_list_item(ref_list, item)
+            def _gp_refresh_visible(force=False, on_complete=None):
+                key = window._pm_current_file()
+                refresh_func = all_refresh_funcs.get(_pm_file_key(key)) if key is not None else None
+                if not callable(refresh_func):
+                    if callable(on_complete):
+                        on_complete()
+                    return
+                refresh_func(force=force, on_complete=on_complete)
 
-                        def _empty_refinement_menu(pos):
-                            clicked = ref_list.itemAt(pos)
-                            if clicked is not None and not clicked.isSelected():
-                                ref_list.clearSelection()
-                                clicked.setSelected(True)
-                            selected_items = [
-                                item for item in ref_list.selectedItems()
-                                if item.data(Qt.UserRole + 3)
-                            ]
-                            if not selected_items:
-                                return
-                            selected_keys = [str(item.data(Qt.UserRole + 3)) for item in selected_items]
-                            aggregate_selected = any(key.startswith('all::') for key in selected_keys)
-                            active_types = _active_glossary_refinement_types()
-                            selected_types = _normalize_glossary_refinement_selection(
-                                selected_keys,
-                                active_types,
-                            )
-                            counts = Counter(
-                                _refinement_type_key(entry.get('type'))
-                                for entry in empty_glossary_entries
-                                if isinstance(entry, dict)
-                            )
-                            eligible = sum(counts.get(_refinement_type_key(name), 0) for name in selected_types)
-                            context_menu = QMenu(ref_list)
-                            context_menu.setStyleSheet(
-                                "QMenu { background-color: #2d2d2d; color: white; border: 1px solid #555; padding: 4px 8px 4px 4px; }"
-                                "QMenu::item { padding: 6px 24px 6px 6px; }"
-                                "QMenu::item:selected { background-color: #c0392b; }"
-                                "QMenu::item:disabled { color: #6b7280; background-color: transparent; }"
-                            )
-                            if aggregate_selected or len(selected_items) == 1:
-                                refine_action = context_menu.addAction('✨ Refine this')
-                            else:
-                                refine_action = context_menu.addAction(
-                                    f'✨ Refine selected entry types ({len(selected_types)})'
-                                )
-                            refine_action.setEnabled(eligible > 0)
-                            if context_menu.exec(ref_list.viewport().mapToGlobal(pos)) != refine_action:
-                                return
-                            target_progress = os.path.join(
-                                os.path.dirname(glossary_path),
-                                f'{epub_base}_glossary_progress.json',
-                            ) if glossary_path else None
-                            _confirm_manual_glossary_refinement(
-                                panel,
-                                fp,
-                                target_progress,
-                                selected_types,
-                            )
+            def _gp_on_file_changed(_key):
+                if window._pm_current_tab_name() == 'glossary' and window.isVisible():
+                    _gp_select_current()
+                    QTimer.singleShot(0, _gp_refresh_visible)
 
-                        ref_list.customContextMenuRequested.connect(_empty_refinement_menu)
-                        p_layout.addWidget(ref_list)
-                    
-                    p_layout.addStretch()
-                    
-                    # State container for upgrade tracking
-                    _state = {'upgraded': False}
-                    
-                    def _empty_refresh(force=False, on_complete=None):
-                        """Check if a progress file appeared and upgrade the panel in-place."""
-                        if _state['upgraded']:
-                            if callable(on_complete):
-                                on_complete()
-                            return
-                        gp = _find_gp_for_file(fp)
-                        if gp and os.path.isfile(gp):
-                            _state['upgraded'] = True
-                            # Clear placeholder content
-                            while p_layout.count():
-                                item = p_layout.takeAt(0)
-                                if item and item.widget():
-                                    item.widget().deleteLater()
-                            # Build the real panel content inside this existing panel
-                            real_panel, real_refresh = _build_gp_panel(fp, gp, panel)
-                            p_layout.addWidget(real_panel)
-                            # Replace this refresh func in the parent list
-                            try:
-                                idx = all_refresh_funcs.index(_empty_refresh)
-                                all_refresh_funcs[idx] = real_refresh
-                            except ValueError:
-                                all_refresh_funcs.append(real_refresh)
-                            if force:
-                                real_refresh(force=True, on_complete=on_complete)
-                                return
-                        if callable(on_complete):
-                            on_complete()
-                    
-                    return panel, _empty_refresh
-                
-                if n_files == 1:
-                    # Single file — no tabs needed
-                    _pump_gp_loading("Building glossary panel...")
-                    fp, gp = all_file_entries[0]
-                    if gp:
-                        panel, refresh_fn = _build_gp_panel(fp, gp, gp_dialog, pump_loading=_pump_gp_loading)
+            def _gp_builder_added(key):
+                current = window._pm_current_file()
+                if (
+                    _pm_file_key(key) in gp_waiting
+                    and current is not None
+                    and _pm_file_key(current) == _pm_file_key(key)
+                    and window._pm_current_tab_name() == 'glossary'
+                ):
+                    _gp_select_current()
+                    QTimer.singleShot(0, _gp_refresh_visible)
+
+            window._pm_file_changed_callbacks.append(_gp_on_file_changed)
+            window._pm_glossary_builder_added = _gp_builder_added
+
+            # Explicit refresh bypasses signatures and rebuilds the
+            # visible panel. Hidden books remain untouched so large
+            # multi-book windows stay responsive.
+            action_row = QHBoxLayout()
+            action_row.addStretch()
+            refresh_btn = AnimatedRefreshButton("  Refresh")
+            refresh_btn.setCursor(Qt.PointingHandCursor)
+            refresh_btn.setMinimumHeight(32)
+            refresh_btn.setToolTip("Reload and rebuild the visible glossary progress panel from disk")
+            refresh_btn.setStyleSheet(
+                "QPushButton { "
+                "background-color: #17a2b8; "
+                "color: white; "
+                "padding: 6px 16px; "
+                "font-weight: bold; "
+                "font-size: 10pt; "
+                "}"
+                "QPushButton[refreshActive=\"true\"] { "
+                "background-color: #138496; "
+                "}"
+            )
+
+            def _gp_full_refresh():
+                if not refresh_btn.isEnabled():
+                    return
+                refresh_btn.start_animation()
+                refresh_btn.setEnabled(False)
+                start_time = time.time()
+                min_animation_duration = 0.8
+
+                def _finish_refresh_animation():
+                    elapsed = time.time() - start_time
+                    remaining = max(0, min_animation_duration - elapsed)
+
+                    def _stop_animation():
+                        try:
+                            refresh_btn.stop_animation()
+                            refresh_btn.setEnabled(True)
+                        except RuntimeError:
+                            pass
+
+                    if remaining > 0:
+                        QTimer.singleShot(int(remaining * 1000), _stop_animation)
                     else:
-                        panel, refresh_fn = _build_gp_empty_panel(fp, gp_dialog)
-                    gp_content_layout.addWidget(panel)
-                    all_refresh_funcs.append(refresh_fn)
-                    _pump_gp_loading()
-                
-                elif n_files <= 3:
-                    # Tabs for ≤3 files
-                    _pump_gp_loading(f"Building glossary panels ({n_files} files)...")
-                    notebook = QTabWidget()
-                    notebook.setStyleSheet("""
-                        QTabWidget::pane {
-                            border: 2px solid #40916c;
-                            border-radius: 4px;
-                            background-color: #2d2d2d;
-                        }
-                        QTabBar::tab {
-                            background-color: #3a3a3a;
-                            color: white;
-                            padding: 8px 16px;
-                            margin-right: 2px;
-                            border: 1px solid #40916c;
-                            border-bottom: none;
-                            border-top-left-radius: 4px;
-                            border-top-right-radius: 4px;
-                            font-size: 10pt;
-                        }
-                        QTabBar::tab:selected {
-                            background-color: #2d6a4f;
-                            color: #d8f3dc;
-                            font-weight: bold;
-                        }
-                        QTabBar::tab:hover { background-color: #40916c; }
-                    """)
-                    for fp, gp in all_file_entries:
-                        epub_base = os.path.splitext(os.path.basename(fp))[0]
-                        if gp:
-                            panel, refresh_fn = _build_gp_panel(fp, gp, notebook, pump_loading=_pump_gp_loading)
-                        else:
-                            panel, refresh_fn = _build_gp_empty_panel(fp, notebook)
-                        notebook.addTab(panel, epub_base)
-                        all_refresh_funcs.append(refresh_fn)
-                        _pump_gp_loading()
-                    gp_content_layout.addWidget(notebook)
-                    gp_navigation_widget = notebook
-                
-                else:
-                    # Dropdown navigation for >3 files
-                    _pump_gp_loading(f"Building glossary panels ({n_files} files)...")
-                    
-                    nav_row = QHBoxLayout()
-                    nav_row.setSpacing(6)
-                    
-                    nav_prev = QPushButton("◀")
-                    nav_prev.setFixedWidth(36)
-                    nav_prev.setStyleSheet(
-                        "QPushButton { background-color:#3a3a3a; color:white; font-weight:bold; "
-                        "font-size:13pt; border:1px solid #5a9fd4; border-radius:4px; padding:4px; }"
-                        "QPushButton:hover { background-color:#4a8fc4; }"
-                        "QPushButton:disabled { color:#666; background-color:#2a2a2a; }"
-                    )
-                    
-                    combo = QComboBox()
-                    combo.setStyleSheet(
-                        "QComboBox { background-color:#3a3a3a; color:white; font-weight:bold; "
-                        "font-size:11pt; padding:6px 10px; border:1px solid #5a9fd4; border-radius:4px; }"
-                        "QComboBox::drop-down { border:none; }"
-                        "QComboBox QAbstractItemView { background-color:#2d2d2d; color:white; "
-                        "selection-background-color:#5a9fd4; }"
-                    )
-                    
-                    nav_counter = QLabel("1 / 1")
-                    nav_counter.setStyleSheet("color:#94a3b8; font-size:10pt; font-weight:bold;")
-                    nav_counter.setFixedWidth(60)
-                    nav_counter.setAlignment(Qt.AlignCenter)
-                    
-                    nav_next = QPushButton("▶")
-                    nav_next.setFixedWidth(36)
-                    nav_next.setStyleSheet(nav_prev.styleSheet())
-                    
-                    nav_row.addWidget(nav_prev)
-                    nav_row.addWidget(combo, stretch=1)
-                    nav_row.addWidget(nav_counter)
-                    nav_row.addWidget(nav_next)
-                    gp_content_layout.addLayout(nav_row)
-                    
-                    stack = QStackedWidget()
-                    
-                    for fp, gp in all_file_entries:
-                        epub_base = os.path.splitext(os.path.basename(fp))[0]
-                        if gp:
-                            panel, refresh_fn = _build_gp_panel(fp, gp, stack, pump_loading=_pump_gp_loading)
-                        else:
-                            panel, refresh_fn = _build_gp_empty_panel(fp, stack)
-                        stack.addWidget(panel)
-                        combo.addItem(epub_base)
-                        all_refresh_funcs.append(refresh_fn)
-                        _pump_gp_loading()
-                    
-                    def _update_nav():
-                        idx = combo.currentIndex()
-                        n = combo.count()
-                        nav_prev.setEnabled(idx > 0)
-                        nav_next.setEnabled(idx < n - 1)
-                        nav_counter.setText(f"{idx + 1} / {n}")
-                        stack.setCurrentIndex(idx)
-                    
-                    combo.currentIndexChanged.connect(lambda _: _update_nav())
-                    nav_prev.clicked.connect(lambda: combo.setCurrentIndex(combo.currentIndex() - 1))
-                    nav_next.clicked.connect(lambda: combo.setCurrentIndex(combo.currentIndex() + 1))
-                    _update_nav()
-                    
-                    gp_content_layout.addWidget(stack)
-                    gp_navigation_widget = stack
+                        _stop_animation()
 
-                def _gp_active_refresh_index():
-                    if gp_navigation_widget is None:
-                        return 0
-                    try:
-                        return max(0, gp_navigation_widget.currentIndex())
-                    except (AttributeError, RuntimeError):
-                        return 0
-
-                def _invoke_gp_refresher(refresh_func, force=False, on_complete=None):
-                    refresh_func(force=force, on_complete=on_complete)
-
-                def _gp_refresh_visible(force=False, on_complete=None):
-                    if not all_refresh_funcs:
-                        if callable(on_complete):
-                            on_complete()
-                        return
-                    idx = min(_gp_active_refresh_index(), len(all_refresh_funcs) - 1)
-                    _invoke_gp_refresher(
-                        all_refresh_funcs[idx],
-                        force=force,
-                        on_complete=on_complete,
-                    )
-
-                if isinstance(gp_navigation_widget, QTabWidget):
-                    gp_navigation_widget.currentChanged.connect(
-                        lambda _idx: QTimer.singleShot(0, _gp_refresh_visible)
-                    )
-                elif isinstance(gp_navigation_widget, QStackedWidget):
-                    gp_navigation_widget.currentChanged.connect(
-                        lambda _idx: QTimer.singleShot(0, _gp_refresh_visible)
-                    )
-
-                # Explicit refresh bypasses signatures and rebuilds the
-                # visible panel. Hidden books remain untouched so large
-                # multi-book dialogs stay responsive.
-                action_row = QHBoxLayout()
-                action_row.addStretch()
-                refresh_btn = AnimatedRefreshButton("  Refresh")
-                refresh_btn.setCursor(Qt.PointingHandCursor)
-                refresh_btn.setMinimumHeight(32)
-                refresh_btn.setToolTip("Reload and rebuild the visible glossary progress panel from disk")
-                refresh_btn.setStyleSheet(
-                    "QPushButton { "
-                    "background-color: #17a2b8; "
-                    "color: white; "
-                    "padding: 6px 16px; "
-                    "font-weight: bold; "
-                    "font-size: 10pt; "
-                    "}"
-                    "QPushButton[refreshActive=\"true\"] { "
-                    "background-color: #138496; "
-                    "}"
+                QTimer.singleShot(
+                    50,
+                    lambda: _gp_refresh_visible(
+                        force=True,
+                        on_complete=_finish_refresh_animation,
+                    ),
                 )
 
-                def _gp_full_refresh():
-                    if not refresh_btn.isEnabled():
+            refresh_btn.clicked.connect(_gp_full_refresh)
+            action_row.addWidget(refresh_btn)
+            action_row.addStretch()
+            gp_content_layout.addLayout(action_row)
+
+            # Slow reliability fallback. Filesystem watcher events provide
+            # the real-time path and normal ticks refresh only the active page.
+            def _gp_refresh_all():
+                try:
+                    if not window.isVisible() or window._pm_current_tab_name() != 'glossary':
                         return
-                    refresh_btn.start_animation()
-                    refresh_btn.setEnabled(False)
-                    start_time = time.time()
-                    min_animation_duration = 0.8
-
-                    def _finish_refresh_animation():
-                        elapsed = time.time() - start_time
-                        remaining = max(0, min_animation_duration - elapsed)
-
-                        def _stop_animation():
-                            try:
-                                refresh_btn.stop_animation()
-                                refresh_btn.setEnabled(True)
-                            except RuntimeError:
-                                pass
-
-                        if remaining > 0:
-                            QTimer.singleShot(int(remaining * 1000), _stop_animation)
-                        else:
-                            _stop_animation()
-
-                    QTimer.singleShot(
-                        50,
-                        lambda: _gp_refresh_visible(
-                            force=True,
-                            on_complete=_finish_refresh_animation,
-                        ),
-                    )
-
-                refresh_btn.clicked.connect(_gp_full_refresh)
-                action_row.addWidget(refresh_btn)
-
-                close_btn = QPushButton("Close")
-                close_btn.setStyleSheet(
-                    "QPushButton { background-color: #555; color: white; padding: 6px 20px; "
-                    "border-radius: 4px; font-size: 10pt; } "
-                    "QPushButton:hover { background-color: #666; }"
-                )
-                close_btn.clicked.connect(gp_dialog.hide)
-                action_row.addWidget(close_btn)
-                action_row.addStretch()
-                gp_content_layout.addLayout(action_row)
-
-                try:
-                    loading_timer = getattr(gp_dialog, '_loading_icon_timer', None)
-                    if loading_timer is not None:
-                        loading_timer.stop()
+                    _gp_refresh_visible()
                 except Exception:
                     pass
-                try:
-                    gp_main_layout.removeWidget(loading_widget)
-                    loading_widget.hide()
-                    loading_widget.setParent(None)
-                    loading_widget.deleteLater()
-                except Exception:
-                    pass
-                gp_content.show()
-                try:
-                    from PySide6.QtWidgets import QApplication
-                    QApplication.processEvents(QEventLoop.AllEvents, 50)
-                except Exception:
-                    pass
-                
-                # Slow reliability fallback. Filesystem watcher events provide
-                # the real-time path and normal ticks refresh only the active page.
-                def _gp_refresh_all():
-                    try:
-                        if not gp_dialog.isVisible():
-                            return
-                        _gp_refresh_visible()
-                    except Exception:
-                        pass
 
-                _gp_timer = QTimer(gp_dialog)
-                _gp_timer.setInterval(2000)
-                _gp_timer.timeout.connect(_gp_refresh_all)
-                _gp_timer.start()
-                gp_dialog._gp_auto_refresh_timer = _gp_timer
-                gp_dialog._gp_refresh_visible = _gp_refresh_visible
-                gp_dialog._gp_full_refresh = _gp_full_refresh
+            _gp_timer = QTimer(gp_content)
+            _gp_timer.setInterval(2000)
+            _gp_timer.timeout.connect(_gp_refresh_all)
+            gp_content._gp_auto_refresh_timer = _gp_timer
+            gp_content._gp_refresh_visible = _gp_refresh_visible
+            gp_content._gp_full_refresh = _gp_full_refresh
 
-                # Stop auto-refresh timer when dialog is hidden to avoid
-                # main-thread JSON parsing lag during translation
-                _original_gp_hide_event = gp_dialog.hideEvent
-                def _gp_hide_event(event):
-                    try:
-                        if _gp_timer.isActive():
-                            _gp_timer.stop()
-                    except Exception:
-                        pass
-                    _original_gp_hide_event(event)
-                gp_dialog.hideEvent = _gp_hide_event
+            # The timer runs only while the window is visible and this tab is
+            # current (it used to stop in the old dialog's hideEvent), so no
+            # main-thread JSON parsing lags a translation in the background.
+            def _gp_tab_shown():
+                _gp_select_current()
+                if not _gp_timer.isActive():
+                    _gp_timer.start()
+                QTimer.singleShot(0, _gp_refresh_all)
 
-                # Restart the timer and refresh the visible panel whenever the
-                # cached dialog becomes visible again. Without this the auto-
-                # refresh stayed dead after the first hide (hideEvent stops it
-                # and nothing restarted it), and re-shown panels were stale.
-                _original_gp_show_event = gp_dialog.showEvent
-                def _gp_show_event(event):
-                    try:
-                        _original_gp_show_event(event)
-                    except Exception:
-                        pass
-                    try:
-                        if not _gp_timer.isActive():
-                            _gp_timer.start()
-                        QTimer.singleShot(0, _gp_refresh_all)
-                    except Exception:
-                        pass
-                gp_dialog.showEvent = _gp_show_event
-                
-                # Cache on parent dialog so all tabs share the same instance
-                dialog._glossary_progress_dialog = gp_dialog
-                dialog._gp_refresh_funcs = all_refresh_funcs
-                
-                gp_dialog.show()
-            
-            except Exception as e:
-                print(f"⚠️ Error showing glossary progress: {e}")
-                import traceback
-                traceback.print_exc()
-        
+            def _gp_tab_hidden():
+                if _gp_timer.isActive():
+                    _gp_timer.stop()
+
+            window._pm_tab_callbacks['glossary'] = (_gp_tab_shown, _gp_tab_hidden)
+            window._pm_glossary_page = gp_content
+
+            # Cache on the Progress Manager so every file's button finds the page
+            dialog._glossary_progress_dialog = gp_content
+            dialog._gp_refresh_funcs = list(all_refresh_funcs.values())
+            return gp_content
+
         dialog._show_glossary_progress = _show_glossary_progress
-        glossary_progress_btn.clicked.connect(_show_glossary_progress)
-        title_layout.addWidget(glossary_progress_btn)
+        if callable(getattr(parent_dialog, '_pm_register_glossary', None)):
+            parent_dialog._pm_register_glossary(
+                file_path, _build_gp_file_panel, _build_glossary_page, _gp_count_stats
+            )
+        if glossary_progress_btn is not None:
+            glossary_progress_btn.clicked.connect(_show_glossary_progress)
+            title_layout.addWidget(glossary_progress_btn)
+
+        # ── Interactive Images: this file's output folder for the window's tab (the tab is the way in) ──
+        if callable(getattr(parent_dialog, '_pm_register_images', None)):
+            parent_dialog._pm_register_images(file_path, output_dir)
         
         # Periodic check: show/hide button based on file existence (3s)
         # Uses single-pass caching to avoid redundant filesystem scans
@@ -12129,18 +12609,22 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 gp_results = {fp: _find_gp_for_file(fp) for fp in all_epubs}
                 found_paths = {fp: gp for fp, gp in gp_results.items() if gp}
                 any_exists = bool(found_paths)
-                glossary_progress_btn.setVisible(True)
-                if any_exists:
-                    count = len(found_paths)
-                    if count == 1:
-                        gp = next(iter(found_paths.values()))
-                        glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{gp}")
+                if callable(getattr(parent_dialog, '_pm_update_glossary_count', None)):
+                    # Glossary tab label: completed/total of the current file
+                    parent_dialog._pm_update_glossary_count()
+                if glossary_progress_btn is not None:   # absent inside a window that has the Glossary tab
+                    glossary_progress_btn.setVisible(True)
+                    if any_exists:
+                        count = len(found_paths)
+                        if count == 1:
+                            gp = next(iter(found_paths.values()))
+                            glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{gp}")
+                        else:
+                            glossary_progress_btn.setToolTip(f"View glossary extraction progress ({count}/{len(all_epubs)} files)")
+                    elif is_multi:
+                        glossary_progress_btn.setToolTip(f"View glossary extraction progress ({len(all_epubs)} files)")
                     else:
-                        glossary_progress_btn.setToolTip(f"View glossary extraction progress ({count}/{len(all_epubs)} files)")
-                elif is_multi:
-                    glossary_progress_btn.setToolTip(f"View glossary extraction progress ({len(all_epubs)} files)")
-                else:
-                    glossary_progress_btn.setToolTip("View glossary extraction progress")
+                        glossary_progress_btn.setToolTip("View glossary extraction progress")
                 _update_text_analysis_button()
             except RuntimeError:
                 # Widget was deleted
@@ -12152,6 +12636,9 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
         _gp_vis_timer.start()
         # Parent timer to container so it dies with the dialog
         _gp_vis_timer.setParent(container)
+        if callable(getattr(parent_dialog, '_pm_update_glossary_count', None)):
+            # The Glossary tab's count should not wait for the first 3 s tick
+            QTimer.singleShot(0, _check_glossary_btn_visibility)
         
         container_layout.addWidget(title_row)
         
@@ -15224,172 +15711,29 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 self._multi_file_retranslation_dialog.deleteLater()
                 self._multi_file_retranslation_dialog = None
             
-            # Create main dialog
-            dialog = QDialog(self)
+            # One Progress Manager window: the shared file dropdown + the
+            # Translation / Glossary / Interactive Images tabs.
+            dialog = self._build_progress_manager_window(
+                "Progress Manager - Multiple Files",
+                summary_text=f"Selected: {', '.join(summary_parts)}",
+                width_ratio=0.44,
+                height_ratio=0.45,
+            )
             self._stamp_progress_manager_input_signature(dialog)
-            dialog.setWindowTitle("Progress Manager - Multiple Files")
-            # Parent-child windowing keeps this above the translator GUI
-            dialog.setWindowModality(Qt.NonModal)
             # Store the list of EPUBs in the dialog for cross-tab state updates
             dialog._epub_files_in_dialog = epub_files + text_files
-            # Increased height from 18% to 25% for better visibility
-            width, height = self._get_dialog_size(0.25, 0.45)
-            dialog.resize(width, height)
-            
-            # Set icon
+            # The spinner belongs to single-file windows; each file page here shows
+            # its own "Loading ..." line.
             try:
-                from PySide6.QtGui import QIcon
-                if hasattr(self, 'base_dir'):
-                    base_dir = self.base_dir
-                else:
-                    base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-                ico_path = os.path.join(base_dir, 'Halgakos.ico')
-                if os.path.isfile(ico_path):
-                    dialog.setWindowIcon(QIcon(ico_path))
-            except Exception as e:
-                print(f"Failed to load icon: {e}")
-            
-            dialog_layout = QVBoxLayout(dialog)
-            
-            # Summary label
-            summary_label = QLabel(f"Selected: {', '.join(summary_parts)}")
-            summary_font = QFont('Arial', 12)
-            summary_font.setBold(True)
-            summary_label.setFont(summary_font)
-            dialog_layout.addWidget(summary_label)
-            
-            # Count total files for UI decision
-            total_files = len(epub_files) + len(text_files) + len(folders) + len(image_files)
-            use_dropdown = total_files > 3
+                spinner_timer = getattr(dialog, '_loading_icon_timer', None)
+                if spinner_timer is not None:
+                    spinner_timer.stop()
+                dialog._pm_loading_widget.deleteLater()
+            except Exception:
+                pass
+            dialog._advance_loading_icon = None
+            notebook = dialog._pm_notebook
 
-            if use_dropdown:
-                # ── Dropdown + arrows for many files ──
-                from PySide6.QtWidgets import QComboBox, QStackedWidget
-
-                nav_row = QHBoxLayout()
-                nav_row.setSpacing(6)
-
-                nav_prev = QPushButton("◀")
-                nav_prev.setFixedWidth(36)
-                nav_prev.setStyleSheet(
-                    "QPushButton { background-color:#3a3a3a; color:white; font-weight:bold; "
-                    "font-size:13pt; border:1px solid #5a9fd4; border-radius:4px; padding:4px; }"
-                    "QPushButton:hover { background-color:#4a8fc4; }"
-                    "QPushButton:disabled { color:#666; background-color:#2a2a2a; }"
-                )
-
-                combo = QComboBox()
-                combo.setStyleSheet(
-                    "QComboBox { background-color:#3a3a3a; color:white; font-weight:bold; "
-                    "font-size:11pt; padding:6px 10px; border:1px solid #5a9fd4; border-radius:4px; }"
-                    "QComboBox::drop-down { border:none; }"
-                    "QComboBox QAbstractItemView { background-color:#2d2d2d; color:white; "
-                    "selection-background-color:#5a9fd4; }"
-                )
-
-                nav_counter = QLabel("1 / 1")
-                nav_counter.setStyleSheet("color:#94a3b8; font-size:10pt; font-weight:bold;")
-                nav_counter.setFixedWidth(60)
-                nav_counter.setAlignment(Qt.AlignCenter)
-
-                nav_next = QPushButton("▶")
-                nav_next.setFixedWidth(36)
-                nav_next.setStyleSheet(nav_prev.styleSheet())
-
-                nav_row.addWidget(nav_prev)
-                nav_row.addWidget(combo, stretch=1)
-                nav_row.addWidget(nav_counter)
-                nav_row.addWidget(nav_next)
-                dialog_layout.addLayout(nav_row)
-
-                stack = QStackedWidget()
-                dialog_layout.addWidget(stack)
-
-                def _update_nav():
-                    idx = combo.currentIndex()
-                    n = combo.count()
-                    nav_prev.setEnabled(idx > 0)
-                    nav_next.setEnabled(idx < n - 1)
-                    nav_counter.setText(f"{idx + 1} / {n}")
-                    stack.setCurrentIndex(idx)
-                    populate_current = getattr(dialog, '_populate_current_progress_tab', None)
-                    if callable(populate_current):
-                        QTimer.singleShot(0, populate_current)
-
-                combo.currentIndexChanged.connect(lambda _: _update_nav())
-                nav_prev.clicked.connect(lambda: combo.setCurrentIndex(combo.currentIndex() - 1))
-                nav_next.clicked.connect(lambda: combo.setCurrentIndex(combo.currentIndex() + 1))
-
-                # Wrap stack+combo to behave like QTabWidget for the rest of the code
-                class _DropdownNotebook:
-                    """Thin adapter so addTab() works the same as QTabWidget."""
-                    def __init__(self, stack, combo):
-                        self._stack = stack
-                        self._combo = combo
-                    def addTab(self, widget, label):
-                        self._stack.addWidget(widget)
-                        self._combo.addItem(label)
-                    def currentIndex(self):
-                        return self._combo.currentIndex()
-                    def setCurrentIndex(self, idx):
-                        self._combo.setCurrentIndex(idx)
-
-                notebook = _DropdownNotebook(stack, combo)
-                dialog._dropdown_update_nav = _update_nav
-            else:
-                # ── Standard tabs for ≤7 files ──
-                notebook = QTabWidget()
-                notebook.setStyleSheet("""
-                    QTabWidget::pane {
-                        border: 2px solid transparent;
-                        border-radius: 4px;
-                        background-color: #2d2d2d;
-                    }
-                    QTabBar::tab {
-                        background-color: #3a3a3a;
-                        color: white;
-                        padding: 8px 16px;
-                        margin-right: 2px;
-                        border: 1px solid #5a9fd4;
-                        border-bottom: none;
-                        border-top-left-radius: 4px;
-                        border-top-right-radius: 4px;
-                        font-weight: bold;
-                        font-size: 11pt;
-                    }
-                    QTabBar::tab:selected {
-                        background-color: #5a9fd4;
-                        color: white;
-                    }
-                    QTabBar::tab:hover {
-                        background-color: #4a8fc4;
-                    }
-                    QTabBar QToolButton {
-                        background-color: #3a3a3a;
-                        border: 1px solid #5a9fd4;
-                        border-radius: 3px;
-                        color: white;
-                        font-weight: bold;
-                        font-size: 14pt;
-                        width: 36px;
-                        padding: 4px;
-                        margin: 2px 4px;
-                    }
-                    QTabBar QToolButton:hover {
-                        background-color: #4a8fc4;
-                    }
-                    QTabBar::scroller {
-                        width: 52px;
-                    }
-                """)
-                dialog_layout.addWidget(notebook)
-                notebook.currentChanged.connect(
-                    lambda _idx: QTimer.singleShot(
-                        0,
-                        getattr(dialog, '_populate_current_progress_tab', lambda: None),
-                    )
-                )
-            
             # Track all tab data
             tab_data = []
             tabs_created = False
@@ -15446,20 +15790,14 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             # each EPUB/text tab on its own event-loop turn.
             self._add_multi_file_buttons(dialog, notebook, tab_data)
 
-            def closeEvent(event):
-                event.ignore()
-                dialog.hide()
-
-            dialog.closeEvent = closeEvent
             self._multi_file_retranslation_dialog = dialog
             self._multi_file_selection_key = selection_key
 
             def _update_dropdown_nav_safe():
-                if hasattr(dialog, '_dropdown_update_nav'):
-                    try:
-                        dialog._dropdown_update_nav()
-                    except RuntimeError:
-                        pass
+                try:
+                    dialog._pm_update_nav()
+                except RuntimeError:
+                    pass
 
             build_tasks = []
             for file_path in epub_files + text_files:
@@ -15478,9 +15816,7 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                 loading_label.setStyleSheet("color: #94a3b8; font-size: 10pt; font-weight: bold; padding: 18px;")
                 tab_layout.addWidget(loading_label)
 
-                tab_name = file_base if use_dropdown else (file_base[:20] + "..." if len(file_base) > 20 else file_base)
-                notebook.addTab(tab_frame, tab_name)
-                _update_dropdown_nav_safe()
+                notebook.addTab(tab_frame, file_base, key=os.path.abspath(file_path))
                 build_tasks.append(('epub_text', file_path, file_base, tab_frame, loading_label))
 
             for folder_path in folders:
@@ -15576,6 +15912,8 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
                             completed = sum(1 for info in cdi if info.get('status') == 'completed')
                             in_progress = sum(1 for info in cdi if info.get('status') == 'in_progress')
                             tab_data.append(tab_result)
+                            dialog._pm_page_data[os.path.abspath(path)] = tab_result
+                            dialog._pm_update_translation_count()
                             build_state['tabs_created'] = True
                             QTimer.singleShot(0, _populate_current_progress_tab)
                             print(f"[DEBUG] Successfully created tab for {label} (progress: {completed} done, {in_progress} in-progress)")
@@ -15605,156 +15943,6 @@ class RetranslationMixin(ProgressViewMixin, SdlxliffAutogenMixin):
             QTimer.singleShot(50, _build_next_tab)
             return
 
-            # Create tabs for EPUB/text files using shared logic
-            pending_tabs = []  # Collect before sorting
-            for file_path in epub_files + text_files:
-                file_base = os.path.splitext(os.path.basename(file_path))[0]
-                
-                print(f"[DEBUG] Checking EPUB/text: {file_base}")
-                
-                # Quick check if output exists (respect override output directory)
-                # NOTE: For multi-file, don't skip when missing — the tab builder will
-                # create the output folder (same as single-file behavior).
-                output_dir = os.path.join(override_dir, file_base) if override_dir else file_base
-                if not os.path.exists(output_dir):
-                    print(f"[DEBUG] Output folder missing for {file_base}; will create via tab builder: {output_dir}")
-                
-                print(f"[DEBUG] Creating tab for {file_base}")
-                
-                # Create tab
-                tab_frame = QWidget()
-                tab_layout = QVBoxLayout(tab_frame)
-                tab_name = file_base if use_dropdown else (file_base[:20] + "..." if len(file_base) > 20 else file_base)
-                
-                # Use shared logic to populate the tab with global state
-                tab_result = self._force_retranslation_epub_or_text(
-                    file_path, 
-                    parent_dialog=dialog, 
-                    tab_frame=tab_frame,
-                    show_special_files_state=global_show_special
-                )
-                
-                # Only keep the tab if content was successfully created
-                if tab_result:
-                    # Count progress for sorting
-                    cdi = tab_result.get('chapter_display_info', [])
-                    completed = sum(1 for info in cdi if info.get('status') == 'completed')
-                    in_progress = sum(1 for info in cdi if info.get('status') == 'in_progress')
-                    progress_score = completed + in_progress
-                    pending_tabs.append((progress_score, tab_frame, tab_name, tab_result))
-                    print(f"[DEBUG] Successfully created tab for {file_base} (progress: {completed} done, {in_progress} in-progress)")
-                else:
-                    print(f"[DEBUG] Failed to create content for {file_base}")
-            
-            # Sort tabs: most progress first
-            pending_tabs.sort(key=lambda t: t[0], reverse=True)
-            for _score, tab_frame, tab_name, tab_result in pending_tabs:
-                notebook.addTab(tab_frame, tab_name)
-                tab_data.append(tab_result)
-                tabs_created = True
-            
-            # Create tabs for image folders (keeping existing logic for now)
-            for folder_path in folders:
-                folder_result = self._create_image_folder_tab(
-                    folder_path, 
-                    notebook, 
-                    dialog
-                )
-                if folder_result:
-                    tab_data.append(folder_result)
-                    tabs_created = True
-            
-            # If only individual image files selected and no tabs created yet
-            if image_files and not tabs_created:
-                # Create a single tab for all individual images
-                image_tab_result = self._create_individual_images_tab(
-                    image_files,
-                    notebook,
-                    dialog
-                )
-                if image_tab_result:
-                    tab_data.append(image_tab_result)
-                    tabs_created = True
-            
-            # If no tabs were created from folders, try scanning folders for individual images
-            if not tabs_created and folders:
-                # Scan folders for individual image files
-                scanned_images = []
-                for folder_path in folders:
-                    if os.path.isdir(folder_path):
-                        try:
-                            for file in os.listdir(folder_path):
-                                file_path = os.path.join(folder_path, file)
-                                if os.path.isfile(file_path) and file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
-                                    scanned_images.append(file_path)
-                        except:
-                            pass
-                
-                # If we found images, create a tab for them
-                if scanned_images:
-                    image_tab_result = self._create_individual_images_tab(
-                        scanned_images,
-                        notebook,
-                        dialog
-                    )
-                    if image_tab_result:
-                        tab_data.append(image_tab_result)
-                        tabs_created = True
-            
-            # If still no tabs were created, show error
-            if not tabs_created:
-                self._styled_msgbox(QMessageBox.Information, self, "Info", 
-                    "No translation output found for any of the selected files.\n\n"
-                    "Make sure the output folders exist in your script directory.")
-                dialog.close()
-                return
-        
-            # Add unified button bar that works across all tabs
-            self._add_multi_file_buttons(dialog, notebook, tab_data)
-            
-            # Override close event to minimize instead of destroy
-            def closeEvent(event):
-                event.ignore()  # Ignore the close event
-                dialog.hide()   # Just hide (minimize) the dialog
-            
-            dialog.closeEvent = closeEvent
-            
-            # Cache the dialog and selection key for reuse
-            self._multi_file_retranslation_dialog = dialog
-            self._multi_file_selection_key = selection_key
-            
-            # Update dropdown nav state after all tabs are added
-            if hasattr(dialog, '_dropdown_update_nav'):
-                dialog._dropdown_update_nav()
-
-            # Show the dialog (non-modal to allow interaction with other windows)
-            dialog.show()
-
-            def _populate_tabs_after_show():
-                for _idx, _td in enumerate(tab_data):
-                    if _td:
-                        QTimer.singleShot(
-                            _idx * 10,
-                            lambda td=_td: self._populate_progress_listbox_streamed(td),
-                        )
-
-            # Trigger refresh after the dialog has painted so large tabs do not block opening.
-            def _refresh_tabs_after_show():
-                if tab_data:
-                    print(f"[DEBUG] Auto-clicking refresh on all {len(tab_data)} tabs on dialog open...")
-                    for _td in tab_data:
-                        _rf = _td.get('refresh_func') if _td else None
-                        if callable(_rf):
-                            try:
-                                _rf()
-                            except Exception as _e:
-                                print(f"[WARN] Auto-refresh failed for a tab: {_e}")
-                else:
-                    print(f"[WARN] No tab data to refresh on dialog open")
-
-            QTimer.singleShot(50, _populate_tabs_after_show)
-            QTimer.singleShot(150, _refresh_tabs_after_show)
-            
         except Exception as e:
             print(f"[ERROR] _force_retranslation_multiple_files failed: {e}")
             import traceback

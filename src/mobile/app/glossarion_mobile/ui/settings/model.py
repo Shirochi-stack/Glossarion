@@ -225,6 +225,15 @@ CURATED_SECTIONS: tuple = (
         ("Contents", ("disable_epub_gallery", "disable_automatic_cover_creation", "skip_non_spine_special_files",
                       "skip_unreferenced_epub_images")),
         ("Styles", ("attach_css_to_chapters", "epub_css_override_path")),
+        # the desktop's "Chapter styles" area: Interactive styles under Attach CSS, and the Interactive Images
+        # settings dialog's plain settings (profiles, prompts, references and the preview: Tools › Interactive
+        # Images, linked at the end of this page)
+        ("Interactive images", ("interactive_css_enabled", "interactive_images_auto_after_translation",
+                                "interactive_images_recompile_after", "interactive_images_text_model",
+                                "interactive_images_image_model", "interactive_images_max_references",
+                                "interactive_images_resolution", "interactive_images_aspect_ratio",
+                                "interactive_images_aspect_choices", "interactive_images_include_gender",
+                                "interactive_images_subjects")),
         ("File names", ("retain_source_extension",)),
         ("Remote images", ("download_remote_image_urls", "remote_image_download_workers",
                            "remote_image_download_interval")),

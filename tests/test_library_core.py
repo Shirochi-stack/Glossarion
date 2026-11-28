@@ -140,6 +140,18 @@ METHOD_EDITS = {
     ("library_core", "RawScanMixin", "_compute_matches"): [
         ("_ScanForRawDialog.MATCH_EXACT", "ScanForRawMixin.MATCH_EXACT"),
     ],
+    # Interactive Images: the reader resolves Interactive_Images/Glossarion_* and reads the interactive styles
+    ("library_core", "BookDetailsMixin", "_build_translated_overlay"): [
+        ("for sub in ('images', 'translated_images'):",
+         "for sub in ('images', 'translated_images', 'Interactive_Images'):"),
+    ],
+    ("library_core", "BookDetailsMixin", "_translated_css_dirs"): [
+        ("\n    return dirs",
+         "\n    interactive_dir = os.path.join(output_folder, 'Interactive_Images')\n"
+         "    if os.path.isfile(os.path.join(interactive_dir, 'glossarion_interactive.css')):\n"
+         "        dirs.append(interactive_dir)\n"
+         "    return dirs"),
+    ],
 }
 
 

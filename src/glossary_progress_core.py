@@ -2863,6 +2863,18 @@ def glossary_stats(model, data=None):
     return model._gp_stats_for_dict(data)
 
 
+def glossary_progress_legend_stats(owner, source_path, gp_path, **model_kwargs):
+    """The Glossary Progress legend numbers of a progress file without any panel.
+
+    Builds the same model the panel builds (same ``make_glossary_progress_model`` keyword
+    arguments) and returns its ``glossary_stats``, so the Progress Manager's Glossary tab
+    label shows, before the panel exists, exactly what the panel's legend will show.  None
+    when the progress file does not exist."""
+    if not gp_path or not os.path.isfile(gp_path):
+        return None
+    return glossary_stats(make_glossary_progress_model(owner, source_path, gp_path, **model_kwargs))
+
+
 def _target_specs(targets):
     specs = []
     for target in targets or []:

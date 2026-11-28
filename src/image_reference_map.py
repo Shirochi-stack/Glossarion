@@ -118,6 +118,12 @@ def _replace_reference(url, filename, page_folder):
     return 'images/' + filename + replacement[len(path):]
 
 
+def _is_interactive_image(url):
+    """Interactive Images (``Interactive_Images/Glossarion_*``) are Glossarion's own: never mapped or repaired."""
+    from interactive_images_core import is_interactive_image_src
+    return is_interactive_image_src(url)
+
+
 def _references(soup):
     """Yield supported local image URLs and setters, in document order."""
     for tag in soup.find_all(True):
@@ -125,7 +131,7 @@ def _references(soup):
                  'object': ('data',), 'video': ('poster',)}.get(tag.name, ())
         for attr in attrs:
             url = tag.get(attr)
-            if isinstance(url, str) and _basename(url):
+            if isinstance(url, str) and _basename(url) and not _is_interactive_image(url):
                 yield url, lambda value, tag=tag, attr=attr: tag.__setitem__(attr, value)
         style = tag.get('style', '')
         if isinstance(style, str):
